@@ -1,0 +1,22 @@
+# Canonical caller for the reusable drift workflow.
+# Copy to a consumer repo as .github/workflows/drift.yml. Bump the two version
+# pins (the uses: ref and engine_ref) together to move to a new engine release.
+name: drift
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  id-token: write
+  pull-requests: read    # the lock sweep reads holder PR state
+
+jobs:
+  engine:
+    uses: nrit-solutions/tf-pr-ops/.github/workflows/drift.yml@v5.0.0 # x-release-please-version
+    with:
+      engine_ref: v5.0.0 # must match the uses: ref above; x-release-please-version
+    secrets: inherit

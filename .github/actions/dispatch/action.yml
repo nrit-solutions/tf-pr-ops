@@ -1,0 +1,438 @@
+name: tf-pr-ops dispatch
+description: >-
+  The engine's pull_request path: resolve the PR, create the App-owned check
+  runs (per-unit, merge gate, approval), package the resolved context, and
+  dispatch the plan work to the consumer's ops workflow on the default
+  branch. On a closed PR it dispatches an unlock instead. One job, one row
+  ("tf-pr-ops / dispatch"), one version pin: the engine core is checked
+  out at the commit this action's ref was published from, and tfpr comes
+  from the core release matching a tag pin or is built from that checkout,
+  so the ref it was pinned at is the engine that runs.
+
+inputs:
+  checks-app-client-id:
+    description: >-
+      Client id of the org's checks App (the TFPR_CHECKS_APP_CLIENT_ID
+      variable). Empty falls back to the workflow token, which puts the
+      engine rows under an arbitrary Actions heading; consumers set it.
+    required: false
+    default: ''
+  checks-app-private-key:
+    description: Private key of the checks App (the TFPR_CHECKS_APP_PRIVATE_KEY secret).
+    required: false
+    default: ''
+  allow-unreviewed-apply:
+    description: >-
+      The TFPR_ALLOW_UNREVIEWED_APPLY variable, passed through because a
+      composite action cannot read the vars context. Feeds the approval row.
+    required: false
+    default: ''
+  engine-app-client-id:
+    description: >-
+      Client id of the engine-reading App (the ENGINE_APP_CLIENT_ID
+      variable). Required when the action runs from the public entrypoint
+      repo: it checks the engine core out of the private
+      nrit-solutions/nrit-tf-pr-ops repository and downloads the prebuilt
+      tfpr binary from the pinned release. Only a vendored copy that carries
+      the Go source can leave it empty.
+    required: false
+    default: ''
+  engine-app-private-key:
+    description: Private key of the engine-reading App (the ENGINE_APP_PRIVATE_KEY secret).
+    required: false
+    default: ''
+  ops-workflow:
+    description: >-
+      File name of the caller workflow that runs the ops (reusable) workflow;
+      the dispatch target for plan work and unlocks.
+    required: false
+    default: tf-pr-ops.yml
+  config-file:
+    description: The projects config file.
+    required: false
+    default: projects.yml
+
+runs:
+  using: composite
+  steps:
+    # The consumer repository, full history: discovery diffs base and head
+    # trees. In vendored mode this is also the engine.
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        fetch-depth: 0
+
+    # The action's own archive is the engine only when it sits in a tree with
+    # Go source: the core repo's own CI and vendored consumers. From the public
+    # entrypoint repo (nrit-solutions/tf-pr-ops) the walk lands on a root
+    # without go.mod, so the core is checked out with the engine App token at
+    # the commit the release job published from. ENGINE_COMMIT is that
+    # commit; for a tag it is the tag's own commit, for a preview branch it
+    # is the core branch head, so a SHA-pinned smoke still runs matching code.
+    - name: Locate engine
+      id: engine
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        ACTION_REF: ${{ github.action_ref }}
+        CLIENT_ID: ${{ inputs.engine-app-client-id }}
+      run: |
+        root="$(cd "$ACTION_PATH/../../.." && pwd)"
+        if [[ -f "$root/go.mod" ]]; then
+          echo "dir=$root" >>"$GITHUB_OUTPUT"
+          echo "checkout=false" >>"$GITHUB_OUTPUT"
+          echo "engine_ref=${ACTION_REF:-vendored} engine_dir=$root (in tree)"
+          exit 0
+        fi
+        if [[ -z "$CLIENT_ID" ]]; then
+          echo "::error::engine-app-client-id is empty. This action runs from the public entrypoint repo and checks the engine core out of the private nrit-solutions/nrit-tf-pr-ops repository, which needs a GitHub App token. Pass the ENGINE_APP_CLIENT_ID variable and the ENGINE_APP_PRIVATE_KEY secret as the caller example does."
+          exit 1
+        fi
+        core_ref="$ACTION_REF"
+        [[ -f "$root/ENGINE_COMMIT" ]] && core_ref="$(tr -d '[:space:]' <"$root/ENGINE_COMMIT")"
+        [[ -n "$core_ref" ]] || { echo "::error::cannot tell which engine commit to check out: no ENGINE_COMMIT file and no action ref"; exit 1; }
+        echo "dir=$GITHUB_WORKSPACE/.tfpr-engine" >>"$GITHUB_OUTPUT"
+        echo "checkout=true" >>"$GITHUB_OUTPUT"
+        echo "core_ref=$core_ref" >>"$GITHUB_OUTPUT"
+        echo "engine_ref=${ACTION_REF:-<empty>} core_ref=$core_ref"
+
+    # Minted for the core's owner, not the caller's: the App is installed on
+    # nrit-solutions with Contents read on the core, whichever org calls. It
+    # authenticates the core checkout and the prebuilt tfpr download for a
+    # tag pin; SHA and branch pins build from the checkout.
+    - name: Engine app token
+      id: engine_token
+      if: inputs.engine-app-client-id != ''
+      uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+      with:
+        client-id: ${{ inputs.engine-app-client-id }}
+        private-key: ${{ inputs.engine-app-private-key }}
+        owner: nrit-solutions
+
+    - name: Checkout engine
+      if: steps.engine.outputs.checkout == 'true'
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        repository: nrit-solutions/nrit-tf-pr-ops
+        ref: ${{ steps.engine.outputs.core_ref }}
+        path: .tfpr-engine
+        token: ${{ steps.engine_token.outputs.token }}
+
+    - name: Install tfpr
+      id: tfpr
+      shell: bash
+      env:
+        GH_TOKEN: ${{ steps.engine_token.outputs.token }}
+        TFPR_ENGINE_REF: ${{ github.action_ref }}
+        ENGINE_DIR: ${{ steps.engine.outputs.dir }}
+      run: |
+        echo "TFPR_ENGINE_DIR=$ENGINE_DIR" >>"$GITHUB_ENV"
+        bash "$ENGINE_DIR/scripts/install-tfpr.sh"
+
+    - name: Set up Go
+      if: steps.tfpr.outputs.installed != 'true'
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version-file: ${{ steps.engine.outputs.dir }}/go.mod
+        cache-dependency-path: ${{ steps.engine.outputs.dir }}/go.sum
+
+    - name: Build tfpr
+      if: steps.tfpr.outputs.installed != 'true'
+      shell: bash
+      env:
+        ENGINE_DIR: ${{ steps.engine.outputs.dir }}
+      run: |
+        go build -C "$ENGINE_DIR" -o "$RUNNER_TEMP/tfpr" ./cmd/tfpr
+        echo "TFPR_BIN=$RUNNER_TEMP/tfpr" >>"$GITHUB_ENV"
+
+    # The same parse the ops workflow runs: opened/synchronize/reopened plan,
+    # closed unlocks.
+    - name: Parse event
+      id: parse
+      shell: bash
+      env:
+        EVENT_NAME: ${{ github.event_name }}
+        EVENT_ACTION: ${{ github.event.action }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+      run: '"$TFPR_BIN" parse-event'
+
+    # Closed PRs release their cross-PR unit locks off-PR: the ops workflow's
+    # unlock job has the Azure login and the environment, this run has
+    # neither. A plain dispatch (no dispatch_run_id) rides the ordinary
+    # workflow_dispatch unlock path.
+    - name: Dispatch unlock (PR closed)
+      if: steps.parse.outputs.command == 'unlock'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        GH_REPO: ${{ github.repository }}
+        WORKFLOW_FILE: ${{ inputs.ops-workflow }}
+        DISPATCH_REF: ${{ github.event.repository.default_branch }}
+        DISPATCH_INPUTS: >-
+          {"command":"unlock",
+           "pr_number":"${{ steps.parse.outputs.pr_number }}"}
+      run: '"$TFPR_BIN" dispatch'
+
+    - name: Resolve PR head and base
+      id: pr
+      if: steps.parse.outputs.command == 'plan'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        GH_REPO: ${{ github.repository }}
+        PR_NUMBER: ${{ steps.parse.outputs.pr_number }}
+      run: |
+        read -r head base sha cross < <(gh pr view "$PR_NUMBER" \
+          --json headRefName,baseRefName,headRefOid,isCrossRepository \
+          --jq '"\(.headRefName) \(.baseRefName) \(.headRefOid) \(.isCrossRepository)"')
+        if [ "$cross" = "true" ]; then
+          echo "fork pull requests are not supported" >&2
+          exit 1
+        fi
+        echo "head_ref=$head" >>"$GITHUB_OUTPUT"
+        echo "base_ref=$base" >>"$GITHUB_OUTPUT"
+        echo "head_sha=$sha" >>"$GITHUB_OUTPUT"
+
+    - name: Compute changed files
+      id: changed
+      if: steps.parse.outputs.command == 'plan'
+      shell: bash
+      env:
+        BASE_REF: ${{ steps.pr.outputs.base_ref }}
+        HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+        CONFIG_FILE: ${{ inputs.config-file }}
+      run: '"$TFPR_BIN" changed-files'
+
+    # Terragrunt discovery needs terragrunt available; other modes are pure
+    # filesystem. A nested local uses: resolves against the consumer
+    # workspace, not this action's repository, so stage the engine's
+    # setup-tools there first; resolution happens when the step starts, so
+    # the copy is in place in time.
+    - name: Detect terragrunt mode
+      id: mode
+      if: steps.parse.outputs.command == 'plan'
+      shell: bash
+      run: |
+        mode="$("$TFPR_BIN" discover --print-mode)"
+        if [ "$mode" = terragrunt ]; then echo "tg=true" >>"$GITHUB_OUTPUT"; else echo "tg=false" >>"$GITHUB_OUTPUT"; fi
+
+    - name: Stage setup-tools
+      if: steps.parse.outputs.command == 'plan' && steps.mode.outputs.tg == 'true'
+      shell: bash
+      run: |
+        rm -rf "$GITHUB_WORKSPACE/.tfpr-setup-tools"
+        cp -R "$TFPR_ENGINE_DIR/.github/actions/setup-tools" "$GITHUB_WORKSPACE/.tfpr-setup-tools"
+
+    - name: Setup tools (terragrunt discovery)
+      if: steps.parse.outputs.command == 'plan' && steps.mode.outputs.tg == 'true'
+      env:
+        # Kept in lockstep with the workflows by check-fallback-versions.sh.
+        FALLBACK_TERRAGRUNT_VERSION: "1.1.2"
+      uses: ./.tfpr-setup-tools
+      with:
+        tools: terragrunt
+        terragrunt_version: ${{ env.FALLBACK_TERRAGRUNT_VERSION }}
+
+    - name: Select projects
+      id: select
+      if: steps.parse.outputs.command == 'plan'
+      shell: bash
+      env:
+        CONFIG_FILE: ${{ inputs.config-file }}
+        CHANGED_FILES: ${{ steps.changed.outputs.files }}
+        # The removed-unit check reuses this inventory instead of
+        # re-discovering the PR tree.
+        TFPR_UNITS_FILE: ${{ runner.temp }}/tfpr-head-units.json
+      run: '"$TFPR_BIN" discover'
+
+    - name: Detect removed units
+      id: removed
+      if: steps.parse.outputs.command == 'plan'
+      shell: bash
+      env:
+        CONFIG_FILE: ${{ inputs.config-file }}
+        BASE_REF: ${{ steps.pr.outputs.base_ref }}
+        HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+        CHANGED_FILES: ${{ steps.changed.outputs.files }}
+        HEAD_UNITS_FILE: ${{ runner.temp }}/tfpr-head-units.json
+        REMOVED_REPORT_FILE: ${{ runner.temp }}/tfpr-removed.md
+      run: '"$TFPR_BIN" detect-removed-units'
+
+    - name: Report removed units
+      if: steps.parse.outputs.command == 'plan' && steps.removed.outputs.removed_units != ''
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        GH_REPO: ${{ github.repository }}
+        PR_NUMBER: ${{ steps.parse.outputs.pr_number }}
+        REPORT_FILE: ${{ runner.temp }}/tfpr-removed.md
+      run: '"$TFPR_BIN" comment'
+
+    # The engine rows are created with the org's checks App token so they
+    # carry its heading and avatar; unset, the workflow token keeps them under
+    # an arbitrary Actions heading. A configured client id with a broken key
+    # fails loudly here rather than split-braining creation and completion.
+    - name: Checks app token
+      id: checks_token
+      if: steps.parse.outputs.command == 'plan' && inputs.checks-app-client-id != ''
+      uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+      with:
+        client-id: ${{ inputs.checks-app-client-id }}
+        private-key: ${{ inputs.checks-app-private-key }}
+        owner: ${{ github.repository_owner }}
+        repositories: ${{ github.event.repository.name }}
+
+    - name: Approval check
+      if: steps.parse.outputs.command == 'plan' && steps.pr.outputs.head_sha != ''
+      shell: bash
+      env:
+        GH_TOKEN: ${{ steps.checks_token.outputs.token || github.token }}
+        # The checks App holds Checks permissions only; the reviewDecision
+        # query runs on the workflow token.
+        GH_QUERY_TOKEN: ${{ github.token }}
+        GH_REPO: ${{ github.repository }}
+        PR_NUMBER: ${{ steps.parse.outputs.pr_number }}
+        HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+        RUN_ID: ${{ github.run_id }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        ALLOW_UNREVIEWED_APPLY: ${{ inputs.allow-unreviewed-apply }}
+      run: '"$TFPR_BIN" approval-status'
+
+    # The required merge gate goes queued ("Waiting for plan") the moment the
+    # engine takes the PR; the dispatched run's gate completes it, or the
+    # count-0 step below does.
+    - name: Open merge gate
+      id: gate_pending
+      if: steps.parse.outputs.command == 'plan' && steps.pr.outputs.head_sha != ''
+      shell: bash
+      env:
+        GH_TOKEN: ${{ steps.checks_token.outputs.token || github.token }}
+        GH_REPO: ${{ github.repository }}
+        HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+        RUN_ID: ${{ github.run_id }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      run: '"$TFPR_BIN" checks gate-pending'
+
+    # One in_progress check per selected project, completed by the dispatched
+    # run under the same run stamp. Best effort: visibility must not take the
+    # merge gate down with it.
+    - name: Create PR checks
+      id: checks
+      continue-on-error: true
+      if: >-
+        steps.parse.outputs.command == 'plan' &&
+        steps.select.outputs.count != '0' &&
+        steps.pr.outputs.head_sha != ''
+      shell: bash
+      env:
+        GH_TOKEN: ${{ steps.checks_token.outputs.token || github.token }}
+        GH_REPO: ${{ github.repository }}
+        HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+        COMMAND: plan
+        PROJECTS: ${{ steps.select.outputs.projects }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        RUN_ID: ${{ github.run_id }}
+        RUN_NUMBER: ${{ github.run_number }}
+      run: '"$TFPR_BIN" checks create'
+
+    # Nothing to plan means nothing to dispatch: write the gate verdict here
+    # (No Terraform changes, a removal, or a discovery gap that blocks).
+    - name: Complete merge gate (nothing to plan)
+      if: >-
+        steps.parse.outputs.command == 'plan' &&
+        steps.select.outputs.count == '0' &&
+        steps.pr.outputs.head_sha != ''
+      shell: bash
+      env:
+        GH_TOKEN: ${{ steps.checks_token.outputs.token || github.token }}
+        GH_REPO: ${{ github.repository }}
+        HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+        COMMAND: plan
+        COUNT: "0"
+        TF_CHANGED: ${{ steps.changed.outputs.tf_changed }}
+        UNATTRIBUTED: ${{ steps.select.outputs.unattributed }}
+        REMOVED_UNITS: ${{ steps.removed.outputs.removed_units }}
+        REMOVED_CHECK: ${{ steps.removed.outputs.removed_check }}
+        REMOVED_EXPLAINS_TF: ${{ steps.removed.outputs.removed_explains_tf }}
+        RUN_ID: ${{ github.run_id }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      run: '"$TFPR_BIN" merge-gate'
+
+    # The handoff: package the resolved context, keyed to this run id (which
+    # the check external ids also carry), and dispatch the ops workflow on
+    # the default branch. Its run is not PR-associated, so no native rows
+    # beyond this job ever reach the PR.
+    - name: Package dispatch context
+      id: package
+      if: >-
+        steps.parse.outputs.command == 'plan' &&
+        steps.select.outputs.count != '0' &&
+        steps.pr.outputs.head_sha != ''
+      shell: bash
+      env:
+        PROJECTS: ${{ steps.select.outputs.projects }}
+        COUNT: ${{ steps.select.outputs.count }}
+        UNATTRIBUTED: ${{ steps.select.outputs.unattributed }}
+        TF_CHANGED: ${{ steps.changed.outputs.tf_changed }}
+        REMOVED_UNITS: ${{ steps.removed.outputs.removed_units }}
+        REMOVED_CHECK: ${{ steps.removed.outputs.removed_check }}
+        REMOVED_EXPLAINS_TF: ${{ steps.removed.outputs.removed_explains_tf }}
+        HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+        RUN_ID: ${{ github.run_id }}
+        RUN_NUMBER: ${{ github.run_number }}
+      run: |
+        mkdir -p .tfpr-dispatch
+        jq -n \
+          --arg projects "$PROJECTS" \
+          --arg count "$COUNT" \
+          --arg unattributed "$UNATTRIBUTED" \
+          --arg tf_changed "$TF_CHANGED" \
+          --arg removed_units "$REMOVED_UNITS" \
+          --arg removed_check "$REMOVED_CHECK" \
+          --arg removed_explains_tf "$REMOVED_EXPLAINS_TF" \
+          --arg head_sha "$HEAD_SHA" \
+          --arg check_run_id "$RUN_ID" \
+          --arg check_run_number "$RUN_NUMBER" \
+          '$ARGS.named' > .tfpr-dispatch/context.json
+
+    - name: Upload dispatch context
+      if: steps.package.outcome == 'success'
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: tfpr-dispatch-context
+        path: .tfpr-dispatch/context.json
+        retention-days: 1
+
+    - name: Dispatch the plan run
+      id: dispatch
+      if: steps.package.outcome == 'success'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        GH_REPO: ${{ github.repository }}
+        WORKFLOW_FILE: ${{ inputs.ops-workflow }}
+        DISPATCH_REF: ${{ github.event.repository.default_branch }}
+        DISPATCH_INPUTS: >-
+          {"command":"plan",
+           "pr_number":"${{ steps.parse.outputs.pr_number }}",
+           "head_sha":"${{ steps.pr.outputs.head_sha }}",
+           "dispatch_run_id":"${{ github.run_id }}",
+           "dispatch_run_number":"${{ github.run_number }}"}
+      run: '"$TFPR_BIN" dispatch'
+
+    # A dispatch that never happened leaves the per-unit checks in_progress
+    # and the merge gate queued with nothing to complete or sweep them, so
+    # cancel everything this run created while it still can; a cancelled gate
+    # keeps merge blocked. Re-run by pushing again or commenting /plan.
+    - name: Cancel checks after a failed dispatch
+      if: >-
+        failure() &&
+        (steps.checks.outcome == 'success' || steps.gate_pending.outcome == 'success') &&
+        steps.dispatch.outcome != 'success'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ steps.checks_token.outputs.token || github.token }}
+        GH_REPO: ${{ github.repository }}
+        HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+        RUN_ID: ${{ github.run_id }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      run: '"$TFPR_BIN" checks cancel'

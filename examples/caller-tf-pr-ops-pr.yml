@@ -1,0 +1,56 @@
+# PR caller for tf-pr-ops. Copy to a consumer repo as
+# .github/workflows/tf-pr-ops-pr.yml, next to tf-pr-ops.yml (the ops caller),
+# tf-pr-ops-unlock.yml (the closed-event unlock) and drift.yml. One version
+# pin: the dispatch action knows its own ref.
+#
+# The pre-commit job is consumer-owned convention, not engine contract: it
+# runs the hooks from this repository's own .pre-commit-config.yaml, and you
+# may extend, weaken, or remove the gate per repo. The engine-enforced gates
+# (authorization, approval, merge gate) do not depend on it.
+name: tf-pr-ops
+
+# The closed event lives in tf-pr-ops-unlock.yml: splitting it out keeps a
+# merged PR's checks list free of a skipped pre-commit row and a duplicate
+# dispatch row from the unlock run (#206).
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+  checks: write          # the engine-authored check runs, merge gate included
+  actions: write         # dispatch the ops workflow
+
+jobs:
+  # First and gating: a failed lint stops dispatch, so no plan runs and no
+  # report lands on a PR that fails its own hooks; merge stays blocked
+  # because the required merge gate is never created.
+  pre-commit:
+    if: github.event.repository.is_template != true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Without the cache every push rebuilds every hook environment from
+      # scratch, on the critical path in front of dispatch. Keyed on the
+      # config, so a hook bump invalidates cleanly.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml') }}
+      - run: pipx run pre-commit run --all-files --show-diff-on-failure
+
+  dispatch:
+    needs: pre-commit
+    if: github.event.repository.is_template != true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: nrit-solutions/tf-pr-ops/.github/actions/dispatch@v5.0.0 # x-release-please-version
+        with:
+          checks-app-client-id: ${{ vars.TFPR_CHECKS_APP_CLIENT_ID }}
+          checks-app-private-key: ${{ secrets.TFPR_CHECKS_APP_PRIVATE_KEY }}
+          allow-unreviewed-apply: ${{ vars.TFPR_ALLOW_UNREVIEWED_APPLY }}
+          # Lets the action download the prebuilt tfpr for its pinned tag
+          # instead of building from source. Optional; empty builds.
+          engine-app-client-id: ${{ vars.ENGINE_APP_CLIENT_ID }}
+          engine-app-private-key: ${{ secrets.ENGINE_APP_PRIVATE_KEY }}

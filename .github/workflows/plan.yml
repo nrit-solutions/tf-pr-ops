@@ -1,0 +1,309 @@
+name: terraform-pr-ops plan
+
+# The plan matrix, split out of terraform-pr-ops.yml.
+#
+# A job name cannot both expand per project and degrade when the job is skipped:
+# GitHub prints the name template verbatim when there is no matrix leg to expand
+# it against, and an empty matrix is an error rather than a silent skip, so the
+# job cannot simply vanish. Splitting the matrix into its own workflow gives the
+# parent's calling job a static "plan" row when nothing plans, while a run that
+# does plan still gets one readable row per project from the matrix below.
+#
+# Called only by the `plan` job in terraform-pr-ops.yml, which owns the guard
+# conditions. Nothing here re-checks them.
+
+on:
+  workflow_call:
+    inputs:
+      engine_ref:
+        description: "nrit-tf-pr-ops ref the parent was called at; empty in vendored mode"
+        type: string
+        required: true
+      command:
+        description: the resolved command, always plan on this path
+        type: string
+        required: true
+      projects:
+        description: JSON array of selected projects; the matrix source
+        type: string
+        required: true
+      pr_number:
+        type: string
+        required: true
+      head_sha:
+        description: the commit resolve pinned, not the moving PR head ref
+        type: string
+        required: true
+      # The run identity stamped on the pre-created PR checks: the parent
+      # run's on a comment plan, the dispatcher's on a dispatched plan.
+      check_run_id:
+        type: string
+        default: ''
+      check_run_number:
+        type: string
+        default: ''
+    secrets:
+      ARM_CLIENT_ID:
+        required: false
+      ARM_TENANT_ID:
+        required: false
+      ARM_SUBSCRIPTION_ID:
+        required: false
+      ENGINE_APP_PRIVATE_KEY:
+        required: false
+      INFRACOST_API_KEY:
+        required: false
+      TFPR_CHECKS_APP_PRIVATE_KEY:
+        required: false
+
+env:
+  # The private core every job checks out and downloads tfpr from. Fixed:
+  # the core exists only in this org, and the engine App token is minted for
+  # its owner so a caller in any org reads it. TFPR_ENGINE_REPO also feeds
+  # scripts/install-tfpr.sh.
+  TFPR_ENGINE_OWNER: nrit-solutions
+  TFPR_ENGINE_REPO: nrit-solutions/nrit-tf-pr-ops
+  # Used only when the repo has no version manager (mise/asdf). Duplicated from
+  # terraform-pr-ops.yml, which still needs them for the apply job;
+  # scripts/check-fallback-versions.sh fails CI if the two drift apart.
+  FALLBACK_TERRAFORM_VERSION: "1.9.8"
+  FALLBACK_TERRAGRUNT_VERSION: "1.1.2"
+
+jobs:
+  project:
+    # Name the job by the full project path for the Actions run page. No run
+    # of this workflow is PR-associated (comment and dispatched runs alike),
+    # so these rows never reach the PR; the PR surface is the engine-created
+    # checks the parent's resolve job pre-creates and this job completes.
+    name: ${{ matrix.project.label }}
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
+    # Bind the OIDC login to the plan environment (its federated subject is
+    # scoped to this). Override the name with TFPR_PLAN_ENVIRONMENT. The
+    # subject is repo + environment, so moving the job into this workflow does
+    # not change it.
+    environment: ${{ vars.TFPR_PLAN_ENVIRONMENT || 'plan' }}
+    permissions:
+      contents: read
+      id-token: write        # Azure OIDC login
+      pull-requests: write   # post the run report
+      checks: write          # complete the pre-created PR check
+    strategy:
+      fail-fast: false
+      matrix:
+        project: ${{ fromJson(inputs.projects) }}
+    # Serialize runs against the same project so state locks never collide.
+    concurrency:
+      group: tfpr-${{ matrix.project.label }}
+      cancel-in-progress: false
+    env:
+      # Vendored mode: engine scripts live in the workspace (the consumer PR head).
+      # Reusable mode: they are checked out to .tfpr-engine at the pinned engine_ref,
+      # keeping engine scripts pinned while PR code stays in the workspace as data.
+      TFPR_ENGINE_DIR: ${{ inputs.engine_ref != '' && format('{0}/.tfpr-engine', github.workspace) || github.workspace }}
+      ARM_USE_OIDC: "true"
+      ARM_USE_AZUREAD: "true"
+      # Identity via OIDC: prefer the consumer's Action variables (nrit-alz-live
+      # uses AZURE_*), fall back to secrets (the demos set ARM_*).
+      ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID || secrets.ARM_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID || secrets.ARM_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID || secrets.ARM_SUBSCRIPTION_ID }}
+      # Terragrunt backend config: root.hcl reads these via get_env(). Consumers
+      # (e.g. nrit-alz-live) set them as Action variables; empty is harmless in
+      # plain Terraform mode, where the backend comes from backend.tf instead.
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      BACKEND_AZURE_RESOURCE_GROUP_NAME: ${{ vars.BACKEND_AZURE_RESOURCE_GROUP_NAME }}
+      BACKEND_AZURE_STORAGE_ACCOUNT_NAME: ${{ vars.BACKEND_AZURE_STORAGE_ACCOUNT_NAME }}
+      BACKEND_AZURE_STORAGE_ACCOUNT_CONTAINER_NAME: ${{ vars.BACKEND_AZURE_STORAGE_ACCOUNT_CONTAINER_NAME }}
+    steps:
+      # Check out the exact commit resolve pinned, not the moving PR head ref, so
+      # the code that runs is the code that was selected and gated.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.head_sha }}
+          fetch-depth: 0
+
+      # Reusable mode needs a token that reads the private engine repository:
+      # the engine checkout below and the prebuilt tfpr download use it. Units
+      # never fetch private repositories (public AVM sources, vendored policy
+      # library), so nothing else authenticates git. Skipped when
+      # ENGINE_APP_CLIENT_ID is unset.
+      - name: Engine app token
+        id: engine_token
+        if: vars.ENGINE_APP_CLIENT_ID != ''
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.ENGINE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.ENGINE_APP_PRIVATE_KEY }}
+          owner: ${{ env.TFPR_ENGINE_OWNER }}
+
+      - name: Azure login (OIDC)
+        uses: azure/login@f5d393ae46f8fde4be8b75f32e3fc50e654ad0ca # v3.0.1
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID || secrets.ARM_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID || secrets.ARM_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID || secrets.ARM_SUBSCRIPTION_ID }}
+
+      # Reusable mode: check out the engine at the pinned ref into .tfpr-engine
+      # (after the consumer checkout, so it is never wiped) with the engine
+      # app token.
+      - name: Checkout engine
+        if: inputs.engine_ref != ''
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.TFPR_ENGINE_REPO }}
+          ref: ${{ inputs.engine_ref }}
+          path: .tfpr-engine
+          token: ${{ steps.engine_token.outputs.token }}
+
+      # The renderer and the GitHub-facing scripts run as the tfpr binary:
+      # the pinned release's prebuilt asset, or a build from the pinned
+      # source when no asset fits, so engine_ref keeps meaning source pin.
+      # In place before verify-head so the verification itself uses the
+      # compiled port; the shell scripts stay in-tree and run when TFPR_BIN
+      # is unset.
+      - name: Install tfpr
+        id: tfpr
+        env:
+          GH_TOKEN: ${{ steps.engine_token.outputs.token }}
+          TFPR_ENGINE_REF: ${{ inputs.engine_ref }}
+        run: bash "${TFPR_ENGINE_DIR:-$GITHUB_WORKSPACE}/scripts/install-tfpr.sh"
+
+      - name: Set up Go
+        if: steps.tfpr.outputs.installed != 'true'
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: ${{ env.TFPR_ENGINE_DIR }}/go.mod
+          cache-dependency-path: ${{ env.TFPR_ENGINE_DIR }}/go.sum
+
+      - name: Build tfpr
+        if: steps.tfpr.outputs.installed != 'true'
+        run: |
+          go build -C "$TFPR_ENGINE_DIR" -o "$RUNNER_TEMP/tfpr" ./cmd/tfpr
+          echo "TFPR_BIN=$RUNNER_TEMP/tfpr" >>"$GITHUB_ENV"
+
+      # Runs after the engine checkout (the script lives there in reusable mode)
+      # and before any project code, so a head that moved stops the run.
+      - name: Verify PR head is unchanged
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+        run: '"$TFPR_BIN" verify-head'
+
+      # setup-tools' local action path cannot take an expression, so vendored and
+      # reusable modes are two mutually exclusive steps (engine at ./ vs .tfpr-engine).
+      - name: Setup tools
+        if: inputs.engine_ref == ''
+        uses: ./.github/actions/setup-tools
+        with:
+          tools: ${{ matrix.project.tool == 'terragrunt' && 'terraform terragrunt' || 'terraform' }}
+          terraform_version: ${{ env.FALLBACK_TERRAFORM_VERSION }}
+          terragrunt_version: ${{ env.FALLBACK_TERRAGRUNT_VERSION }}
+          extra_tools: ${{ vars.TFPR_EXTRA_TOOLS }}
+
+      - name: Setup tools (reusable)
+        if: inputs.engine_ref != ''
+        uses: ./.tfpr-engine/.github/actions/setup-tools
+        with:
+          tools: ${{ matrix.project.tool == 'terragrunt' && 'terraform terragrunt' || 'terraform' }}
+          terraform_version: ${{ env.FALLBACK_TERRAFORM_VERSION }}
+          terragrunt_version: ${{ env.FALLBACK_TERRAGRUNT_VERSION }}
+          extra_tools: ${{ vars.TFPR_EXTRA_TOOLS }}
+
+      - name: ${{ inputs.command }} ${{ matrix.project.label }}
+        id: tf
+        env:
+          COMMAND: ${{ inputs.command }}
+          PROJECT_NAME: ${{ matrix.project.name }}
+          PROJECT_DIR: ${{ matrix.project.dir }}
+          PROJECT_LABEL: ${{ matrix.project.label }}
+          PROJECT_TOOL: ${{ matrix.project.tool }}
+          REPORT_FILE: ${{ github.workspace }}/.tfpr/${{ matrix.project.label }}.md
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          STEPS_JSON: ${{ toJson(matrix.project.steps) }}
+          INFRACOST_API_KEY: ${{ secrets.INFRACOST_API_KEY }}
+          INIT_ARGS: ${{ vars.TFPR_INIT_ARGS }}
+          # Stamps the reviewed-plan summary the report embeds for the apply
+          # guard (#186).
+          HEAD_SHA: ${{ inputs.head_sha }}
+          # Cross-PR unit lock ownership (tfpr lock). The token lets the lock
+          # check whether a lock holder PR is already closed (reclaim).
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          TFPR_LOCK_STORAGE_ACCOUNT: ${{ vars.TFPR_LOCK_STORAGE_ACCOUNT }}
+          TFPR_LOCK_TABLE: ${{ vars.TFPR_LOCK_TABLE }}
+          TFPR_DISABLE_LOCKS: ${{ vars.TFPR_DISABLE_LOCKS }}
+        run: '"$TFPR_BIN" run-project'
+
+      - name: Post result comment
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          REPORT_FILE: ${{ github.workspace }}/.tfpr/${{ matrix.project.label }}.md
+          TFPR_MINIMIZE_OUTDATED: ${{ vars.TFPR_MINIMIZE_OUTDATED }}
+        run: '"$TFPR_BIN" comment'
+
+      # Only the app that created a check may complete it, so when the
+      # dedicated checks App is configured the completion presents its token
+      # (see the matching step in the parent's resolve job).
+      - name: Checks app token
+        id: checks_token
+        if: vars.TFPR_CHECKS_APP_CLIENT_ID != ''
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.TFPR_CHECKS_APP_CLIENT_ID }}
+          private-key: ${{ secrets.TFPR_CHECKS_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+
+      # Comment plans and dispatched plans both complete a pre-created check;
+      # a manual dispatch has no PR context (head_sha empty) and skips. The
+      # check identity comes from the inputs, so a dispatched run completes
+      # the checks the dispatcher created.
+      - name: Complete PR check
+        if: >-
+          always() && inputs.head_sha != '' &&
+          (github.event_name == 'issue_comment' || github.event_name == 'workflow_dispatch')
+        env:
+          GH_TOKEN: ${{ steps.checks_token.outputs.token || github.token }}
+          GH_REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+          COMMAND: ${{ inputs.command }}
+          PROJECT_LABEL: ${{ matrix.project.label }}
+          TF_STATUS: ${{ steps.tf.outputs.status }}
+          TF_SUMMARY: ${{ steps.tf.outputs.summary }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUN_ID: ${{ inputs.check_run_id || github.run_id }}
+          RUN_NUMBER: ${{ inputs.check_run_number || github.run_number }}
+        run: '"$TFPR_BIN" checks complete'
+
+      # Record this project's outcome for the merge-gate aggregation. The gate
+      # job is in the parent workflow; artifacts are scoped to the whole run, so
+      # it still finds these.
+      - name: Record gate result
+        if: always()
+        env:
+          LABEL: ${{ matrix.project.label }}
+          STATUS: ${{ steps.tf.outputs.status }}
+        run: |
+          mkdir -p gate
+          printf '%s' "${STATUS:-error}" > "gate/${LABEL//\//__}.status"
+
+      - name: Upload gate result
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gate-${{ strategy.job-index }}
+          path: gate/*.status
+          retention-days: 1
+
+      # locked does not fail the job: a lock is contention, not a defect, and
+      # the merge gate blocks on the status artifact independently. Failing
+      # here only minted a red run for the most common non-error (#132).
+      - name: Fail the job on tf error
+        if: steps.tf.outputs.status == 'error'
+        run: exit 1

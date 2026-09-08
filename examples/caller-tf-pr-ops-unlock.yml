@@ -1,0 +1,29 @@
+# Unlock caller for tf-pr-ops. Copy to a consumer repo as
+# .github/workflows/tf-pr-ops-unlock.yml, next to tf-pr-ops-pr.yml.
+#
+# Releases the PR's cross-PR unit locks when it closes. Its own workflow so
+# a merged PR's checks list shows one row that reads as lock release, instead
+# of a skipped pre-commit row and a second dispatch row stacked on the last
+# real run (#206). The dispatch action's closed path only parses the event
+# and dispatches the unlock, so no checks App credentials are needed here.
+name: tf-pr-ops unlock
+
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  contents: read
+  actions: write         # dispatch the ops workflow
+
+jobs:
+  unlock:
+    if: github.event.repository.is_template != true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: nrit-solutions/tf-pr-ops/.github/actions/dispatch@v5.0.0 # x-release-please-version
+        with:
+          # Lets the action download the prebuilt tfpr for its pinned tag
+          # instead of building from source. Optional; empty builds.
+          engine-app-client-id: ${{ vars.ENGINE_APP_CLIENT_ID }}
+          engine-app-private-key: ${{ secrets.ENGINE_APP_PRIVATE_KEY }}

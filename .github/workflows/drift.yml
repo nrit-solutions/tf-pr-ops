@@ -1,0 +1,493 @@
+name: drift
+
+# Scheduled drift detection, native GitHub Actions, self-contained (no external
+# reusable workflow). Once a day (and on demand):
+#   resolve     lists every project/unit for a drift sweep (projects.yml `drift`
+#               block can scope or disable it), no cloud login
+#   drift-plan  plans each one read-only against the deployed tenant, on the
+#               self-hosted runner (state is firewalled), and uploads just the
+#               result (status + plan report) as an artifact
+#   report      on a hosted runner, turns those results into GitHub Issues: one
+#               issue per drifted unit, opened/refreshed on drift and closed when
+#               it comes back clean
+#
+# The split exists because only the plan needs Terraform state (behind a private
+# endpoint, so it must run on the self-hosted runner, which has no gh); issue
+# management needs only the GitHub API, so it runs on a hosted runner with gh.
+#
+# Read-only: drift-plan runs the plan (Reader) identity in the `plan`
+# environment, the same identity and environment the PR plan uses, so it can
+# never change the tenant. The OIDC subject binds the repo and the `plan`
+# environment, so this reuses the plan federated credential with no new setup;
+# keep the `plan` environment name stable (the subject embeds it).
+
+on:
+  schedule:
+    # Daily at 06:17 UTC. Off the hour to dodge the exact-hour cron congestion
+    # GitHub warns about.
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+  # Reusable mode: a consumer repo calls this workflow with `uses:` and passes
+  # engine_ref (the nrit-tf-pr-ops ref to run scripts from). A non-empty engine_ref
+  # is the mode detector; on schedule/workflow_dispatch inputs.engine_ref is empty.
+  workflow_call:
+    inputs:
+      engine_ref:
+        description: "nrit-tf-pr-ops ref to check out for engine scripts; must match the caller's uses: ref"
+        type: string
+        required: true
+    secrets:
+      ARM_CLIENT_ID:
+        required: false
+      ARM_TENANT_ID:
+        required: false
+      ARM_SUBSCRIPTION_ID:
+        required: false
+      ENGINE_APP_PRIVATE_KEY:
+        required: false
+      INFRACOST_API_KEY:
+        required: false
+
+# Permissions are set per job. resolve does no cloud login, so it must not hold
+# id-token: write: this tenant customizes the OIDC subject to require an
+# `environment` claim, and a token-capable job that binds no environment fails at
+# startup. Only drift-plan (bound to `plan`) gets the token.
+permissions:
+  contents: read
+
+env:
+  # The private core every job checks out and downloads tfpr from. Fixed:
+  # the core exists only in this org, and the engine App token is minted for
+  # its owner so a caller in any org reads it. TFPR_ENGINE_REPO also feeds
+  # scripts/install-tfpr.sh.
+  TFPR_ENGINE_OWNER: nrit-solutions
+  TFPR_ENGINE_REPO: nrit-solutions/nrit-tf-pr-ops
+  CONFIG_FILE: projects.yml
+  # Used only when the repo has no version manager (mise/asdf). When it does,
+  # those pinned versions win (see .github/actions/setup-tools).
+  FALLBACK_TERRAFORM_VERSION: "1.9.8"
+  FALLBACK_TERRAGRUNT_VERSION: "1.1.2"
+
+jobs:
+  resolve:
+    name: resolve
+    # A template repository holds no infrastructure and has no bootstrap-created
+    # variables or secrets, so the scheduled sweep cannot work there. Skipping stops
+    # it failing nightly on the missing engine app credentials. A repository
+    # generated from a template is not itself a template, so this never skips a
+    # customer repo.
+    if: github.event.repository.is_template != true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      projects: ${{ steps.select.outputs.projects }}
+      count: ${{ steps.select.outputs.count }}
+    env:
+      TFPR_ENGINE_DIR: ${{ inputs.engine_ref != '' && format('{0}/.tfpr-engine', github.workspace) || github.workspace }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      # Reusable mode: fetch the engine at the pinned ref. Trusted job, no id-token.
+      #
+      # create-github-app-token fails with a generic "client-id must be set" error
+      # that names neither the missing variable nor why the engine needs it. Fail
+      # first, with something actionable.
+      - name: Check engine credentials
+        if: inputs.engine_ref != '' && vars.ENGINE_APP_CLIENT_ID == ''
+        run: |
+          echo "::error::ENGINE_APP_CLIENT_ID is not set. Reusable mode checks the engine core out of the private nrit-solutions/nrit-tf-pr-ops repository, which needs a GitHub App token minted for that org. Set the ENGINE_APP_CLIENT_ID variable and the ENGINE_APP_PRIVATE_KEY secret; the bootstrap sets both when engine_app_client_id is supplied."
+          exit 1
+
+      - name: Engine app token
+        id: engine_token
+        if: inputs.engine_ref != ''
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.ENGINE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.ENGINE_APP_PRIVATE_KEY }}
+          owner: ${{ env.TFPR_ENGINE_OWNER }}
+
+      - name: Checkout engine
+        if: inputs.engine_ref != ''
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.TFPR_ENGINE_REPO }}
+          ref: ${{ inputs.engine_ref }}
+          path: .tfpr-engine
+          token: ${{ steps.engine_token.outputs.token }}
+
+      # Skew guard: log the requested engine_ref and the SHA actually checked out.
+      - name: Log engine ref
+        if: inputs.engine_ref != ''
+        run: |
+          echo "engine_ref=${{ inputs.engine_ref }}"
+          echo "engine_sha=$(git -C "$GITHUB_WORKSPACE/.tfpr-engine" rev-parse HEAD)"
+
+      # Discovery is the tfpr binary: the pinned release's prebuilt asset,
+      # or a build from the pinned source (same distribution decision as
+      # terraform-pr-ops.yml).
+      - name: Install tfpr
+        id: tfpr
+        env:
+          GH_TOKEN: ${{ steps.engine_token.outputs.token }}
+          TFPR_ENGINE_REF: ${{ inputs.engine_ref }}
+        run: bash "${TFPR_ENGINE_DIR:-$GITHUB_WORKSPACE}/scripts/install-tfpr.sh"
+
+      - name: Set up Go
+        if: steps.tfpr.outputs.installed != 'true'
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: ${{ env.TFPR_ENGINE_DIR }}/go.mod
+          cache-dependency-path: ${{ env.TFPR_ENGINE_DIR }}/go.sum
+
+      - name: Build tfpr
+        if: steps.tfpr.outputs.installed != 'true'
+        run: |
+          go build -C "$TFPR_ENGINE_DIR" -o "$RUNNER_TEMP/tfpr" ./cmd/tfpr
+          echo "TFPR_BIN=$RUNNER_TEMP/tfpr" >>"$GITHUB_ENV"
+
+      # Terragrunt discovery needs terragrunt available. The mode comes from
+      # the same parse that drives discovery; install only then (other modes
+      # are pure filesystem).
+      - name: Detect terragrunt mode
+        id: mode
+        run: |
+          mode="$("$TFPR_BIN" discover --print-mode)"
+          if [ "$mode" = terragrunt ]; then echo "tg=true" >>"$GITHUB_OUTPUT"; else echo "tg=false" >>"$GITHUB_OUTPUT"; fi
+
+      # setup-tools' local action path cannot take an expression, so vendored and
+      # reusable modes are two mutually exclusive steps (engine at ./ vs .tfpr-engine).
+      - name: Setup tools (terragrunt discovery)
+        if: steps.mode.outputs.tg == 'true' && inputs.engine_ref == ''
+        uses: ./.github/actions/setup-tools
+        with:
+          tools: terragrunt
+          terragrunt_version: ${{ env.FALLBACK_TERRAGRUNT_VERSION }}
+
+      - name: Setup tools (terragrunt discovery, reusable)
+        if: steps.mode.outputs.tg == 'true' && inputs.engine_ref != ''
+        uses: ./.tfpr-engine/.github/actions/setup-tools
+        with:
+          tools: terragrunt
+          terragrunt_version: ${{ env.FALLBACK_TERRAGRUNT_VERSION }}
+
+      - name: Select projects (drift sweep)
+        id: select
+        env:
+          CONFIG_FILE: ${{ env.CONFIG_FILE }}
+          DRIFT: "1"
+        run: '"$TFPR_BIN" discover'
+
+  # Release locks whose holder PR is closed or merged. The closed-event
+  # unlock run is the only automatic release path and GitHub creates no run
+  # when the head branch dies with the close, so a lock can leak until the
+  # unit happens to be contended (#180). The sweep heals leaks on the drift
+  # schedule; conflict-time reclaim covers the contended case. No TTL: an
+  # open PR's lock stays held however old, a slow but healthy apply must
+  # never lose its lock.
+  lock-sweep:
+    if: >-
+      vars.TFPR_DISABLE_LOCKS != 'true' &&
+      (vars.TFPR_LOCK_STORAGE_ACCOUNT != '' || vars.BACKEND_AZURE_STORAGE_ACCOUNT_NAME != '')
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
+    environment: ${{ vars.TFPR_UNLOCK_ENVIRONMENT || vars.TFPR_PLAN_ENVIRONMENT || 'plan' }}
+    permissions:
+      contents: read
+      id-token: write        # Azure OIDC login
+      pull-requests: read    # holder PR state
+    env:
+      TFPR_ENGINE_DIR: ${{ inputs.engine_ref != '' && format('{0}/.tfpr-engine', github.workspace) || github.workspace }}
+      TFPR_LOCK_STORAGE_ACCOUNT: ${{ vars.TFPR_LOCK_STORAGE_ACCOUNT }}
+      TFPR_LOCK_TABLE: ${{ vars.TFPR_LOCK_TABLE }}
+      BACKEND_AZURE_STORAGE_ACCOUNT_NAME: ${{ vars.BACKEND_AZURE_STORAGE_ACCOUNT_NAME }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Engine app token
+        id: engine_token
+        if: inputs.engine_ref != ''
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.ENGINE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.ENGINE_APP_PRIVATE_KEY }}
+          owner: ${{ env.TFPR_ENGINE_OWNER }}
+
+      - name: Checkout engine
+        if: inputs.engine_ref != ''
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.TFPR_ENGINE_REPO }}
+          ref: ${{ inputs.engine_ref }}
+          path: .tfpr-engine
+          token: ${{ steps.engine_token.outputs.token }}
+
+      - name: Install tfpr
+        id: tfpr
+        env:
+          GH_TOKEN: ${{ steps.engine_token.outputs.token }}
+          TFPR_ENGINE_REF: ${{ inputs.engine_ref }}
+        run: bash "${TFPR_ENGINE_DIR:-$GITHUB_WORKSPACE}/scripts/install-tfpr.sh"
+
+      - name: Set up Go
+        if: steps.tfpr.outputs.installed != 'true'
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: ${{ env.TFPR_ENGINE_DIR }}/go.mod
+          cache-dependency-path: ${{ env.TFPR_ENGINE_DIR }}/go.sum
+
+      - name: Build tfpr
+        if: steps.tfpr.outputs.installed != 'true'
+        run: |
+          go build -C "$TFPR_ENGINE_DIR" -o "$RUNNER_TEMP/tfpr" ./cmd/tfpr
+          echo "TFPR_BIN=$RUNNER_TEMP/tfpr" >>"$GITHUB_ENV"
+
+      - name: Azure login (OIDC)
+        uses: azure/login@f5d393ae46f8fde4be8b75f32e3fc50e654ad0ca # v3.0.1
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID || secrets.ARM_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID || secrets.ARM_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID || secrets.ARM_SUBSCRIPTION_ID }}
+
+      - name: Sweep stale locks
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: '"$TFPR_BIN" lock sweep-stale'
+
+  drift-plan:
+    name: plan (${{ matrix.project.label }})
+    needs: resolve
+    if: needs.resolve.outputs.count != '0'
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
+    # Bind OIDC to the plan environment (its federated subject is scoped to it).
+    # Override with TFPR_PLAN_ENVIRONMENT.
+    environment: ${{ vars.TFPR_PLAN_ENVIRONMENT || 'plan' }}
+    permissions:
+      contents: read
+      id-token: write        # Azure OIDC login
+    strategy:
+      fail-fast: false
+      matrix:
+        project: ${{ fromJson(needs.resolve.outputs.projects) }}
+    # Share the PR-ops per-unit concurrency group so a drift plan and a PR
+    # plan/apply for the same unit never contend for the state lock.
+    concurrency:
+      group: tfpr-${{ matrix.project.label }}
+      cancel-in-progress: false
+    env:
+      TFPR_ENGINE_DIR: ${{ inputs.engine_ref != '' && format('{0}/.tfpr-engine', github.workspace) || github.workspace }}
+      ARM_USE_OIDC: "true"
+      ARM_USE_AZUREAD: "true"
+      ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID || secrets.ARM_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID || secrets.ARM_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID || secrets.ARM_SUBSCRIPTION_ID }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      BACKEND_AZURE_RESOURCE_GROUP_NAME: ${{ vars.BACKEND_AZURE_RESOURCE_GROUP_NAME }}
+      BACKEND_AZURE_STORAGE_ACCOUNT_NAME: ${{ vars.BACKEND_AZURE_STORAGE_ACCOUNT_NAME }}
+      BACKEND_AZURE_STORAGE_ACCOUNT_CONTAINER_NAME: ${{ vars.BACKEND_AZURE_STORAGE_ACCOUNT_CONTAINER_NAME }}
+    steps:
+      # Scheduled runs check out the default branch: drift is main vs the tenant.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      # Reusable mode needs a token that reads the private engine repository:
+      # the engine checkout below and the prebuilt tfpr download use it. Units
+      # never fetch private repositories (public AVM sources, vendored policy
+      # library), so nothing else authenticates git. Skipped when
+      # ENGINE_APP_CLIENT_ID is unset.
+      - name: Engine app token
+        id: engine_token
+        if: vars.ENGINE_APP_CLIENT_ID != ''
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.ENGINE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.ENGINE_APP_PRIVATE_KEY }}
+          owner: ${{ env.TFPR_ENGINE_OWNER }}
+
+      - name: Azure login (OIDC)
+        uses: azure/login@f5d393ae46f8fde4be8b75f32e3fc50e654ad0ca # v3.0.1
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID || secrets.ARM_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID || secrets.ARM_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID || secrets.ARM_SUBSCRIPTION_ID }}
+
+      # Reusable mode: check out the engine at the pinned ref into .tfpr-engine
+      # (after the consumer checkout, so it is never wiped) with the engine
+      # app token.
+      - name: Checkout engine
+        if: inputs.engine_ref != ''
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.TFPR_ENGINE_REPO }}
+          ref: ${{ inputs.engine_ref }}
+          path: .tfpr-engine
+          token: ${{ steps.engine_token.outputs.token }}
+
+      # The report renderer is the tfpr binary: the pinned release's
+      # prebuilt asset, or a build from the pinned source, so engine_ref
+      # keeps meaning source pin. build_report falls back to the in-tree
+      # shell renderer when TFPR_BIN is unset.
+      - name: Install tfpr
+        id: tfpr
+        env:
+          GH_TOKEN: ${{ steps.engine_token.outputs.token }}
+          TFPR_ENGINE_REF: ${{ inputs.engine_ref }}
+        run: bash "${TFPR_ENGINE_DIR:-$GITHUB_WORKSPACE}/scripts/install-tfpr.sh"
+
+      - name: Set up Go
+        if: steps.tfpr.outputs.installed != 'true'
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: ${{ env.TFPR_ENGINE_DIR }}/go.mod
+          cache-dependency-path: ${{ env.TFPR_ENGINE_DIR }}/go.sum
+
+      - name: Build tfpr
+        if: steps.tfpr.outputs.installed != 'true'
+        run: |
+          go build -C "$TFPR_ENGINE_DIR" -o "$RUNNER_TEMP/tfpr" ./cmd/tfpr
+          echo "TFPR_BIN=$RUNNER_TEMP/tfpr" >>"$GITHUB_ENV"
+
+      # setup-tools' local action path cannot take an expression, so vendored and
+      # reusable modes are two mutually exclusive steps (engine at ./ vs .tfpr-engine).
+      - name: Setup tools
+        if: inputs.engine_ref == ''
+        uses: ./.github/actions/setup-tools
+        with:
+          tools: ${{ matrix.project.tool == 'terragrunt' && 'terraform terragrunt' || 'terraform' }}
+          terraform_version: ${{ env.FALLBACK_TERRAFORM_VERSION }}
+          terragrunt_version: ${{ env.FALLBACK_TERRAGRUNT_VERSION }}
+          extra_tools: ${{ vars.TFPR_EXTRA_TOOLS }}
+
+      - name: Setup tools (reusable)
+        if: inputs.engine_ref != ''
+        uses: ./.tfpr-engine/.github/actions/setup-tools
+        with:
+          tools: ${{ matrix.project.tool == 'terragrunt' && 'terraform terragrunt' || 'terraform' }}
+          terraform_version: ${{ env.FALLBACK_TERRAFORM_VERSION }}
+          terragrunt_version: ${{ env.FALLBACK_TERRAGRUNT_VERSION }}
+          extra_tools: ${{ vars.TFPR_EXTRA_TOOLS }}
+
+      # A non-empty plan is drift; tfpr run-project emits status
+      # no-changes | changes | error. Never fail the job on drift: `changes` is
+      # the expected drift signal and the schedule should stay green (the issue
+      # is the signal). A genuine plan failure surfaces as status=error, which
+      # the report job raises as an issue too.
+      - name: Plan (drift check)
+        id: tf
+        continue-on-error: true
+        env:
+          COMMAND: plan
+          # This report is embedded in an issue, not a PR comment. Suppresses the
+          # /apply instructions, which never run there.
+          TFPR_REPORT_CONTEXT: drift
+          PROJECT_NAME: ${{ matrix.project.name }}
+          PROJECT_DIR: ${{ matrix.project.dir }}
+          PROJECT_LABEL: ${{ matrix.project.label }}
+          PROJECT_TOOL: ${{ matrix.project.tool }}
+          REPORT_FILE: ${{ github.workspace }}/.tfpr/${{ matrix.project.label }}.md
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          STEPS_JSON: ${{ toJson(matrix.project.steps) }}
+          INFRACOST_API_KEY: ${{ secrets.INFRACOST_API_KEY }}
+          INIT_ARGS: ${{ vars.TFPR_INIT_ARGS }}
+        run: '"$TFPR_BIN" run-project'
+
+      # Stage this unit's result (status + report) for the report job. The report
+      # job runs on a hosted runner and never touches state, so only the outcome
+      # crosses the job boundary, not the plan environment.
+      - name: Stage drift result
+        if: always()
+        env:
+          LABEL: ${{ matrix.project.label }}
+          STATUS: ${{ steps.tf.outputs.status }}
+          REPORT_FILE: ${{ github.workspace }}/.tfpr/${{ matrix.project.label }}.md
+        run: |
+          set -euo pipefail
+          mkdir -p drift
+          key="${LABEL//\//__}"
+          jq -n --arg label "$LABEL" --arg status "${STATUS:-error}" \
+            '{label: $label, status: $status}' > "drift/${key}.json"
+          [ -f "$REPORT_FILE" ] && cp "$REPORT_FILE" "drift/${key}.md" || true
+
+      - name: Upload drift result
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: drift-${{ strategy.job-index }}
+          path: drift/*
+          retention-days: 1
+
+  report:
+    name: report drift
+    needs: [resolve, drift-plan]
+    if: always() && needs.resolve.outputs.count != '0'
+    # GitHub API only; no Azure, no state. Hosted runner with gh available.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    env:
+      TFPR_ENGINE_DIR: ${{ inputs.engine_ref != '' && format('{0}/.tfpr-engine', github.workspace) || github.workspace }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Reusable mode: fetch the engine at the pinned ref. Trusted job, no id-token.
+      - name: Engine app token
+        id: engine_token
+        if: inputs.engine_ref != ''
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.ENGINE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.ENGINE_APP_PRIVATE_KEY }}
+          owner: ${{ env.TFPR_ENGINE_OWNER }}
+
+      - name: Checkout engine
+        if: inputs.engine_ref != ''
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.TFPR_ENGINE_REPO }}
+          ref: ${{ inputs.engine_ref }}
+          path: .tfpr-engine
+          token: ${{ steps.engine_token.outputs.token }}
+
+
+      # The drift-issue reporter runs as the tfpr binary: prebuilt from the
+      # pinned release, or built from the pinned source, like the other
+      # jobs.
+      - name: Install tfpr
+        id: tfpr
+        env:
+          GH_TOKEN: ${{ steps.engine_token.outputs.token }}
+          TFPR_ENGINE_REF: ${{ inputs.engine_ref }}
+        run: bash "${TFPR_ENGINE_DIR:-$GITHUB_WORKSPACE}/scripts/install-tfpr.sh"
+
+      - name: Set up Go
+        if: steps.tfpr.outputs.installed != 'true'
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: ${{ env.TFPR_ENGINE_DIR }}/go.mod
+          cache-dependency-path: ${{ env.TFPR_ENGINE_DIR }}/go.sum
+
+      - name: Build tfpr
+        if: steps.tfpr.outputs.installed != 'true'
+        run: |
+          go build -C "$TFPR_ENGINE_DIR" -o "$RUNNER_TEMP/tfpr" ./cmd/tfpr
+          echo "TFPR_BIN=$RUNNER_TEMP/tfpr" >>"$GITHUB_ENV"
+
+      - name: Download drift results
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: drift-*
+          path: drift
+          merge-multiple: true
+
+      - name: Open, refresh, and close drift issues
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          DRIFT_DIR: drift
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: '"$TFPR_BIN" report-drift-issue'
