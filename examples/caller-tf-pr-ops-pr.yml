@@ -45,7 +45,7 @@ jobs:
     if: github.event.repository.is_template != true
     runs-on: ubuntu-latest
     steps:
-      - uses: nrit-solutions/tf-pr-ops/.github/actions/dispatch@v5.0.0 # x-release-please-version
+      - uses: nrit-solutions/tf-pr-ops/.github/actions/dispatch@v5.1.0 # x-release-please-version
         with:
           checks-app-client-id: ${{ vars.TFPR_CHECKS_APP_CLIENT_ID }}
           checks-app-private-key: ${{ secrets.TFPR_CHECKS_APP_PRIVATE_KEY }}

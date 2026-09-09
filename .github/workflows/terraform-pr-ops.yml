@@ -178,6 +178,8 @@ jobs:
       check_run_id: ${{ steps.ctx.outputs.check_run_id }}
       check_run_number: ${{ steps.ctx.outputs.check_run_number }}
       approved: ${{ steps.approval.outputs.approved }}
+      # The apply job's whole condition, decided by tfpr apply-allowed below.
+      apply_allowed: ${{ steps.apply_gate.outputs.apply_allowed }}
     env:
       # Vendored mode: engine scripts live in the workspace. Reusable mode: they
       # are checked out to .tfpr-engine at the pinned engine_ref.
@@ -471,7 +473,7 @@ jobs:
             "$FILTER")" >/dev/null
 
       # Gate apply on the repo's required approvals (GitHub review decision). This
-      # runs on every apply path, not just the comment one: the apply job requires
+      # runs on every apply path, not just the comment one: apply_allowed requires
       # approved == 'true', so a path that skipped the gate would leave the output
       # empty and be refused.
       - name: Approval gate
@@ -524,6 +526,18 @@ jobs:
               printf 'check_run_number=%s\n' "$RUN_NUMBER"
             } >>"$GITHUB_OUTPUT"
           fi
+
+      # Fold run, command, count and approved into the apply job's one
+      # condition. Unconditional, so the output is never empty: the binary
+      # turns every skipped step above into false (internal/ghops/approval.go).
+      - name: Decide apply
+        id: apply_gate
+        env:
+          RUN: ${{ steps.auth.outputs.run }}
+          COMMAND: ${{ steps.parse.outputs.command }}
+          COUNT: ${{ steps.ctx.outputs.count }}
+          APPROVED: ${{ steps.approval.outputs.approved }}
+        run: '"$TFPR_BIN" apply-allowed'
 
       # Checks created with the workflow token land in an arbitrary Actions
       # check suite, so the PR renders them under an unrelated workflow's
@@ -745,13 +759,10 @@ jobs:
     # have no deps, so this degrades to a simple ordered loop for them.
     name: apply (dependency order)
     needs: resolve
-    # approved must be exactly 'true': an empty output means the gate never ran,
-    # which is a bug, not consent.
-    if: >-
-      needs.resolve.outputs.run == 'true' &&
-      needs.resolve.outputs.command == 'apply' &&
-      needs.resolve.outputs.count != '0' &&
-      needs.resolve.outputs.approved == 'true'
+    # apply_allowed is resolve's one tested verdict: run, an apply command, a
+    # non-zero count, and approved exactly 'true'. An empty approved output
+    # means the gate never ran, which is a bug, not consent.
+    if: needs.resolve.outputs.apply_allowed == 'true'
     runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
     # Bind the OIDC login to the apply environment (its federated subject is
     # scoped to this). Override the name with TFPR_APPLY_ENVIRONMENT.
@@ -920,6 +931,8 @@ jobs:
           RUN_NUMBER: ${{ github.run_number }}
           TFPR_MINIMIZE_OUTDATED: ${{ vars.TFPR_MINIMIZE_OUTDATED }}
           INIT_ARGS: ${{ vars.TFPR_INIT_ARGS }}
+          # post_plan hooks re-run on the apply's plan, so the cost gate needs the key here too (#264).
+          INFRACOST_API_KEY: ${{ secrets.INFRACOST_API_KEY }}
           # /apply --force: apply even when the plan differs from the reviewed one.
           TFPR_APPLY_FORCE: ${{ needs.resolve.outputs.force }}
           # Cross-PR unit lock ownership (tfpr lock).
