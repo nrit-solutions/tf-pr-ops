@@ -8,7 +8,7 @@ This repository holds the released copies of the reusable workflows, the
 dispatch action, and the caller examples. The engine itself (the `tfpr`
 binary and the gate scripts) lives in the private core repository
 `nrit-solutions/nrit-tf-pr-ops`. Every job here checks the core out at the
-same version with a GitHub App token that NRIT issues per organisation, so a
+same version with a GitHub App token that NRIT issues per organization, so a
 pinned tag always runs the code it was released with.
 
 ## Consuming

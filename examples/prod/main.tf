@@ -2,6 +2,9 @@
 # with no role assignments (free, no data plane) inside a resource group the
 # identity can only read. The group is created by the platform bootstrap, so
 # the Reader assignment exists before the first plan.
+#
+# Also the unit an engine pull request touches when it changes projects.yml:
+# the merge gate counts that file as Terraform and wants a unit planned.
 
 data "azurerm_resource_group" "selftest" {
   name = var.resource_group_name

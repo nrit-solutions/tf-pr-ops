@@ -394,14 +394,12 @@ runs:
           --arg check_run_number "$RUN_NUMBER" \
           '$ARGS.named' > .tfpr-dispatch/context.json
 
-    - name: Upload dispatch context
-      if: steps.package.outcome == 'success'
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-      with:
-        name: tfpr-dispatch-context
-        path: .tfpr-dispatch/context.json
-        retention-days: 1
-
+    # The context travels in the workflow_dispatch inputs, so the dispatched
+    # run starts at its plan job with no resolve job in front of it. Inputs
+    # are capped at 65,535 characters in total and the context is about 700
+    # bytes per unit, so the cap is a pull request that impacts some hundred
+    # units; past it the checks are canceled below and /plan, which resolves
+    # inside the ops run, has no such cap.
     - name: Dispatch the plan run
       id: dispatch
       if: steps.package.outcome == 'success'
@@ -411,17 +409,29 @@ runs:
         GH_REPO: ${{ github.repository }}
         WORKFLOW_FILE: ${{ inputs.ops-workflow }}
         DISPATCH_REF: ${{ github.event.repository.default_branch }}
-        DISPATCH_INPUTS: >-
-          {"command":"plan",
-           "pr_number":"${{ steps.parse.outputs.pr_number }}",
-           "head_sha":"${{ steps.pr.outputs.head_sha }}",
-           "dispatch_run_id":"${{ github.run_id }}",
-           "dispatch_run_number":"${{ github.run_number }}"}
-      run: '"$TFPR_BIN" dispatch'
+        PR_NUMBER: ${{ steps.parse.outputs.pr_number }}
+        HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+        RUN_ID: ${{ github.run_id }}
+        RUN_NUMBER: ${{ github.run_number }}
+      run: |
+        size=$(wc -c < .tfpr-dispatch/context.json)
+        if [ "$size" -gt 60000 ]; then
+          echo "::error::The resolved plan context is ${size} bytes, more than the 60000 a dispatch can carry: this pull request impacts too many units for one dispatched plan. Split it, or comment /plan, which resolves inside the ops run."
+          exit 1
+        fi
+        DISPATCH_INPUTS="$(jq -c -n \
+          --arg pr_number "$PR_NUMBER" \
+          --arg head_sha "$HEAD_SHA" \
+          --arg dispatch_run_id "$RUN_ID" \
+          --arg dispatch_run_number "$RUN_NUMBER" \
+          --rawfile context .tfpr-dispatch/context.json \
+          '{command: "plan", pr_number: $pr_number, head_sha: $head_sha, dispatch_run_id: $dispatch_run_id, dispatch_run_number: $dispatch_run_number, context: $context}')"
+        export DISPATCH_INPUTS
+        "$TFPR_BIN" dispatch
 
     # A dispatch that never happened leaves the per-unit checks in_progress
     # and the merge gate queued with nothing to complete or sweep them, so
-    # cancel everything this run created while it still can; a cancelled gate
+    # cancel everything this run created while it still can; a canceled gate
     # keeps merge blocked. Re-run by pushing again or commenting /plan.
     - name: Cancel checks after a failed dispatch
       if: >-

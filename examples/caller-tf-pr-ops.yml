@@ -26,6 +26,8 @@ on:
         required: false
       dispatch_run_number:
         required: false
+      context:
+        required: false
 
 # The caller grants the ceiling of permissions the reusable workflow's jobs use.
 permissions:
@@ -33,11 +35,10 @@ permissions:
   pull-requests: write
   checks: write
   id-token: write
-  actions: read # download the dispatch-context artifact
 
 jobs:
   engine:
-    uses: nrit-solutions/tf-pr-ops/.github/workflows/terraform-pr-ops.yml@v5.1.0 # x-release-please-version
+    uses: nrit-solutions/tf-pr-ops/.github/workflows/terraform-pr-ops.yml@v6.0.0 # x-release-please-version
     with:
       command: ${{ inputs.command || 'plan' }}
       project: ${{ inputs.project || '' }}
@@ -45,5 +46,6 @@ jobs:
       head_sha: ${{ inputs.head_sha || '' }}
       dispatch_run_id: ${{ inputs.dispatch_run_id || '' }}
       dispatch_run_number: ${{ inputs.dispatch_run_number || '' }}
-      engine_ref: v5.1.0 # must match the uses: ref above; x-release-please-version
+      context: ${{ inputs.context || '' }}
+      engine_ref: v6.0.0 # must match the uses: ref above; x-release-please-version
     secrets: inherit

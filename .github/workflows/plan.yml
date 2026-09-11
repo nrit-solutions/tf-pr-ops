@@ -212,6 +212,19 @@ jobs:
           terragrunt_version: ${{ env.FALLBACK_TERRAGRUNT_VERSION }}
           extra_tools: ${{ vars.TFPR_EXTRA_TOOLS }}
 
+      # Providers across runs and, in the apply walk, across units: Terraform's
+      # plugin cache, keyed on the lock files. A unit is served from it only
+      # when its lock file carries the h1 hash for this platform (terraform
+      # providers lock -platform=linux_amd64); otherwise Terraform downloads
+      # from the registry and fills the cache for next time (#188).
+      - name: Provider cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/tfpr-provider-cache
+          key: tfpr-providers-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/.terraform.lock.hcl') }}
+          restore-keys: |
+            tfpr-providers-${{ runner.os }}-${{ runner.arch }}-
+
       - name: ${{ inputs.command }} ${{ matrix.project.label }}
         id: tf
         env:
@@ -225,6 +238,7 @@ jobs:
           STEPS_JSON: ${{ toJson(matrix.project.steps) }}
           INFRACOST_API_KEY: ${{ secrets.INFRACOST_API_KEY }}
           INIT_ARGS: ${{ vars.TFPR_INIT_ARGS }}
+          TF_PLUGIN_CACHE_DIR: ${{ runner.temp }}/tfpr-provider-cache
           # Stamps the reviewed-plan summary the report embeds for the apply
           # guard (#186).
           HEAD_SHA: ${{ inputs.head_sha }}
