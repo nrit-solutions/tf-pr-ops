@@ -38,7 +38,7 @@ permissions:
 
 jobs:
   engine:
-    uses: nrit-solutions/tf-pr-ops/.github/workflows/terraform-pr-ops.yml@v6.0.0 # x-release-please-version
+    uses: nrit-solutions/tf-pr-ops/.github/workflows/terraform-pr-ops.yml@v6.0.1 # x-release-please-version
     with:
       command: ${{ inputs.command || 'plan' }}
       project: ${{ inputs.project || '' }}
@@ -47,5 +47,5 @@ jobs:
       dispatch_run_id: ${{ inputs.dispatch_run_id || '' }}
       dispatch_run_number: ${{ inputs.dispatch_run_number || '' }}
       context: ${{ inputs.context || '' }}
-      engine_ref: v6.0.0 # must match the uses: ref above; x-release-please-version
+      engine_ref: v6.0.1 # must match the uses: ref above; x-release-please-version
     secrets: inherit

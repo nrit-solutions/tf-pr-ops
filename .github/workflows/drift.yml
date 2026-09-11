@@ -381,10 +381,14 @@ jobs:
       # when its lock file carries the h1 hash for this platform (terraform
       # providers lock -platform=linux_amd64); otherwise Terraform downloads
       # from the registry and fills the cache for next time (#188).
+      # A path that is the same on every runner instance: actions/cache hashes
+      # the path into the cache version, and runner.temp carries the instance
+      # name on ephemeral self-hosted runners, so a cache saved there was
+      # never found again (#284).
       - name: Provider cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ${{ runner.temp }}/tfpr-provider-cache
+          path: ~/.terraform.d/plugin-cache
           key: tfpr-providers-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/.terraform.lock.hcl') }}
           restore-keys: |
             tfpr-providers-${{ runner.os }}-${{ runner.arch }}-
@@ -406,8 +410,7 @@ jobs:
           STEPS_JSON: ${{ toJson(matrix.project.steps) }}
           INFRACOST_API_KEY: ${{ secrets.INFRACOST_API_KEY }}
           INIT_ARGS: ${{ vars.TFPR_INIT_ARGS }}
-          TF_PLUGIN_CACHE_DIR: ${{ runner.temp }}/tfpr-provider-cache
-        run: '"$TFPR_BIN" run-project'
+        run: TF_PLUGIN_CACHE_DIR="$HOME/.terraform.d/plugin-cache" "$TFPR_BIN" run-project
 
       # Stage this unit's result (status + report) for the report job. The report
       # job runs on a hosted runner and never touches state, so only the outcome

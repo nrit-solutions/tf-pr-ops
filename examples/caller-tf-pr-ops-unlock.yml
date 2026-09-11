@@ -21,7 +21,7 @@ jobs:
     if: github.event.repository.is_template != true
     runs-on: ubuntu-latest
     steps:
-      - uses: nrit-solutions/tf-pr-ops/.github/actions/dispatch@v6.0.0 # x-release-please-version
+      - uses: nrit-solutions/tf-pr-ops/.github/actions/dispatch@v6.0.1 # x-release-please-version
         with:
           # Lets the action download the prebuilt tfpr for its pinned tag
           # instead of building from source. Optional; empty builds.

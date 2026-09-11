@@ -936,10 +936,14 @@ jobs:
       # when its lock file carries the h1 hash for this platform (terraform
       # providers lock -platform=linux_amd64); otherwise Terraform downloads
       # from the registry and fills the cache for next time (#188).
+      # A path that is the same on every runner instance: actions/cache hashes
+      # the path into the cache version, and runner.temp carries the instance
+      # name on ephemeral self-hosted runners, so a cache saved there was
+      # never found again (#284).
       - name: Provider cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ${{ runner.temp }}/tfpr-provider-cache
+          path: ~/.terraform.d/plugin-cache
           key: tfpr-providers-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/.terraform.lock.hcl') }}
           restore-keys: |
             tfpr-providers-${{ runner.os }}-${{ runner.arch }}-
@@ -958,7 +962,6 @@ jobs:
           RUN_NUMBER: ${{ github.run_number }}
           TFPR_MINIMIZE_OUTDATED: ${{ vars.TFPR_MINIMIZE_OUTDATED }}
           INIT_ARGS: ${{ vars.TFPR_INIT_ARGS }}
-          TF_PLUGIN_CACHE_DIR: ${{ runner.temp }}/tfpr-provider-cache
           # For consumers that list the cost gate under the apply stage (#264, #270).
           INFRACOST_API_KEY: ${{ secrets.INFRACOST_API_KEY }}
           # /apply --force: apply even when the plan differs from the reviewed one.
@@ -967,7 +970,7 @@ jobs:
           TFPR_LOCK_STORAGE_ACCOUNT: ${{ vars.TFPR_LOCK_STORAGE_ACCOUNT }}
           TFPR_LOCK_TABLE: ${{ vars.TFPR_LOCK_TABLE }}
           TFPR_DISABLE_LOCKS: ${{ vars.TFPR_DISABLE_LOCKS }}
-        run: '"$TFPR_BIN" apply-ordered'
+        run: TF_PLUGIN_CACHE_DIR="$HOME/.terraform.d/plugin-cache" "$TFPR_BIN" apply-ordered
 
       - name: Upload gate results
         if: always()
