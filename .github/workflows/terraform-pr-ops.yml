@@ -948,6 +948,21 @@ jobs:
           restore-keys: |
             tfpr-providers-${{ runner.os }}-${{ runner.arch }}-
 
+      # Point every unit's pre-created check at this job, so "View more
+      # details" opens the live apply log rather than the run overview.
+      - name: Link PR checks to this job
+        if: needs.resolve.outputs.head_sha != ''
+        env:
+          GH_TOKEN: ${{ steps.checks_token.outputs.token || github.token }}
+          GH_REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ needs.resolve.outputs.head_sha }}
+          RUN_ID: ${{ github.run_id }}
+          PROJECTS: ${{ needs.resolve.outputs.projects }}
+          JOB_SHA: ${{ github.sha }}
+          JOB_RUN_ID: ${{ github.run_id }}
+          JOB_NAME: apply (dependency order)
+        run: '"$TFPR_BIN" checks link'
+
       - name: Apply in dependency order
         env:
           GH_TOKEN: ${{ github.token }}
@@ -960,6 +975,9 @@ jobs:
           # Passed through to the per-unit check completion (see lib.sh).
           RUN_ID: ${{ github.run_id }}
           RUN_NUMBER: ${{ github.run_number }}
+          JOB_SHA: ${{ github.sha }}
+          JOB_RUN_ID: ${{ github.run_id }}
+          JOB_NAME: apply (dependency order)
           TFPR_MINIMIZE_OUTDATED: ${{ vars.TFPR_MINIMIZE_OUTDATED }}
           INIT_ARGS: ${{ vars.TFPR_INIT_ARGS }}
           # For consumers that list the cost gate under the apply stage (#264, #270).

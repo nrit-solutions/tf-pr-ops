@@ -229,6 +229,37 @@ jobs:
           restore-keys: |
             tfpr-providers-${{ runner.os }}-${{ runner.arch }}-
 
+      # Only the app that created a check may update it, so when the
+      # dedicated checks App is configured the link and the completion
+      # present its token (see the matching step in the parent's resolve job).
+      - name: Checks app token
+        id: checks_token
+        if: vars.TFPR_CHECKS_APP_CLIENT_ID != ''
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.TFPR_CHECKS_APP_CLIENT_ID }}
+          private-key: ${{ secrets.TFPR_CHECKS_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+
+      # Point this project's pre-created check at this job, so its "View
+      # more details" opens the live log rather than the run overview. Same
+      # guard as the completion step below.
+      - name: Link PR check to this job
+        if: >-
+          inputs.head_sha != '' &&
+          (github.event_name == 'issue_comment' || github.event_name == 'workflow_dispatch')
+        env:
+          GH_TOKEN: ${{ steps.checks_token.outputs.token || github.token }}
+          GH_REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+          RUN_ID: ${{ inputs.check_run_id || github.run_id }}
+          PROJECT_LABEL: ${{ matrix.project.label }}
+          JOB_SHA: ${{ github.sha }}
+          JOB_RUN_ID: ${{ github.run_id }}
+          JOB_NAME: ${{ matrix.project.label }}
+        run: '"$TFPR_BIN" checks link'
+
       - name: ${{ inputs.command }} ${{ matrix.project.label }}
         id: tf
         env:
@@ -264,19 +295,6 @@ jobs:
           TFPR_MINIMIZE_OUTDATED: ${{ vars.TFPR_MINIMIZE_OUTDATED }}
         run: '"$TFPR_BIN" comment'
 
-      # Only the app that created a check may complete it, so when the
-      # dedicated checks App is configured the completion presents its token
-      # (see the matching step in the parent's resolve job).
-      - name: Checks app token
-        id: checks_token
-        if: vars.TFPR_CHECKS_APP_CLIENT_ID != ''
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          client-id: ${{ vars.TFPR_CHECKS_APP_CLIENT_ID }}
-          private-key: ${{ secrets.TFPR_CHECKS_APP_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-          repositories: ${{ github.event.repository.name }}
-
       # Comment plans and dispatched plans both complete a pre-created check;
       # a manual dispatch has no PR context (head_sha empty) and skips. The
       # check identity comes from the inputs, so a dispatched run completes
@@ -296,6 +314,9 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           RUN_ID: ${{ inputs.check_run_id || github.run_id }}
           RUN_NUMBER: ${{ inputs.check_run_number || github.run_number }}
+          JOB_SHA: ${{ github.sha }}
+          JOB_RUN_ID: ${{ github.run_id }}
+          JOB_NAME: ${{ matrix.project.label }}
         run: '"$TFPR_BIN" checks complete'
 
       # Record this project's outcome for the merge-gate aggregation. The gate
