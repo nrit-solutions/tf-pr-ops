@@ -593,6 +593,24 @@ jobs:
           PROJECT_FILTER: ${{ steps.parse.outputs.project_filter }}
         run: '"$TFPR_BIN" checks gate-pending'
 
+      # Engine work still running on this head (a /plan or /apply while an
+      # earlier run is on the runner). The plan or apply job below queues
+      # behind it on the PR's concurrency group, and the checks created
+      # next say so instead of sitting in progress unexplained (#290).
+      - name: Find running work
+        id: running
+        if: >-
+          steps.auth.outputs.run == 'true' &&
+          github.event_name == 'issue_comment' &&
+          steps.select.outputs.count != '0' &&
+          steps.pr.outputs.head_sha != '' &&
+          steps.approval.outputs.approved != 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+        run: '"$TFPR_BIN" checks running'
+
       # Comment runs get engine-created check runs on the head commit, one
       # per project, completed in-run; the run itself is not attached to the
       # PR at all. Dispatched runs complete the checks the dispatch action
@@ -612,6 +630,8 @@ jobs:
           GH_TOKEN: ${{ steps.checks_token.outputs.token || github.token }}
           GH_REPO: ${{ github.repository }}
           HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+          WAITING_FOR: ${{ steps.running.outputs.running }}
+          WAITING_FOR_URL: ${{ steps.running.outputs.running_url }}
           COMMAND: ${{ steps.parse.outputs.command }}
           PROJECTS: ${{ steps.select.outputs.projects }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -726,6 +746,13 @@ jobs:
     # consumer calling the engine at a pinned ref gets plan.yml from that ref
     # too. `uses:` takes no expression, so this is the only form that can stay
     # pinned.
+    # One concurrency family per pull request, shared with the apply job:
+    # a plan queues behind a running apply of the same PR instead of
+    # planning units whose state is changing under it (#290). The called
+    # matrix legs still serialize per unit on tfpr-<label>.
+    concurrency:
+      group: tfpr-pr-${{ needs.resolve.outputs.pr_number }}
+      cancel-in-progress: false
     uses: ./.github/workflows/plan.yml
     with:
       engine_ref: ${{ inputs.engine_ref }}
@@ -753,6 +780,9 @@ jobs:
       id-token: write        # Azure OIDC login
       pull-requests: write   # post the run report
       checks: write          # complete the pre-created PR check
+    concurrency:
+      group: tfpr-pr-${{ inputs.pr_number || github.event.inputs.pr_number }}
+      cancel-in-progress: false
     uses: ./.github/workflows/plan.yml
     with:
       engine_ref: ${{ inputs.engine_ref }}
@@ -786,9 +816,13 @@ jobs:
       id-token: write        # Azure OIDC login
       pull-requests: write   # post the run report
       checks: write          # complete the pre-created PR check
-    # Serialize applies for the same PR so two /apply comments never race.
+    # The PR's one concurrency family, shared with the plan jobs above: two
+    # /apply comments never race, and a push mid-apply queues its plan
+    # here until the apply finishes (#290). The plan matrix legs also hold
+    # tfpr-<label>, so a unit already planning on this PR is walked only
+    # after that plan job has released the group.
     concurrency:
-      group: tfpr-apply-${{ needs.resolve.outputs.pr_number }}
+      group: tfpr-pr-${{ needs.resolve.outputs.pr_number }}
       cancel-in-progress: false
     env:
       TFPR_ENGINE_DIR: ${{ inputs.engine_ref != '' && format('{0}/.tfpr-engine', github.workspace) || github.workspace }}

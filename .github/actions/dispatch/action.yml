@@ -312,6 +312,27 @@ runs:
         RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       run: '"$TFPR_BIN" checks gate-pending'
 
+    # Engine work still running on this pull request: an apply (or plan) of
+    # the previous head that a push left behind, or a comment run on this
+    # head. The dispatched plan queues behind it on the PR's concurrency
+    # group, and the checks created next name it, so the surface never
+    # silently loses a running apply (#290). The previous head is the
+    # synchronize event's `before`; check runs stay on a commit even after
+    # a force-push drops it from the branch.
+    - name: Find running work
+      id: running
+      if: >-
+        steps.parse.outputs.command == 'plan' &&
+        steps.select.outputs.count != '0' &&
+        steps.pr.outputs.head_sha != ''
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        GH_REPO: ${{ github.repository }}
+        HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+        BEFORE_SHA: ${{ github.event.before }}
+      run: '"$TFPR_BIN" checks running'
+
     # One in_progress check per selected project, completed by the dispatched
     # run under the same run stamp. Best effort: visibility must not take the
     # merge gate down with it.
@@ -327,6 +348,8 @@ runs:
         GH_TOKEN: ${{ steps.checks_token.outputs.token || github.token }}
         GH_REPO: ${{ github.repository }}
         HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+        WAITING_FOR: ${{ steps.running.outputs.running }}
+        WAITING_FOR_URL: ${{ steps.running.outputs.running_url }}
         COMMAND: plan
         PROJECTS: ${{ steps.select.outputs.projects }}
         RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

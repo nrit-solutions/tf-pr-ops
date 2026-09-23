@@ -92,6 +92,9 @@ jobs:
       matrix:
         project: ${{ fromJson(inputs.projects) }}
     # Serialize runs against the same project so state locks never collide.
+    # The calling job holds the PR-wide group (tfpr-pr-<n>) that orders this
+    # plan against the PR's own apply; this one orders it against other PRs
+    # and the drift sweep on the same unit.
     concurrency:
       group: tfpr-${{ matrix.project.label }}
       cancel-in-progress: false
