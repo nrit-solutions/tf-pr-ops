@@ -762,6 +762,9 @@ jobs:
       head_sha: ${{ needs.resolve.outputs.head_sha }}
       check_run_id: ${{ needs.resolve.outputs.check_run_id }}
       check_run_number: ${{ needs.resolve.outputs.check_run_number }}
+      trigger_event: ${{ github.event_name == 'issue_comment' && 'comment' || 'manual' }}
+      trigger_command: ${{ format('/plan{0}', needs.resolve.outputs.project_filter != '' && format(' -p {0}', needs.resolve.outputs.project_filter) || '') }}
+      trigger_actor: ${{ github.actor }}
     secrets: inherit
 
   # The dispatched plan: the dispatch action already resolved, created the
@@ -792,6 +795,8 @@ jobs:
       head_sha: ${{ fromJSON(inputs.context || github.event.inputs.context).head_sha }}
       check_run_id: ${{ fromJSON(inputs.context || github.event.inputs.context).check_run_id }}
       check_run_number: ${{ fromJSON(inputs.context || github.event.inputs.context).check_run_number }}
+      trigger_event: push
+      trigger_actor: ${{ fromJSON(inputs.context || github.event.inputs.context).actor }}
     secrets: inherit
 
   apply:
@@ -1018,6 +1023,9 @@ jobs:
           INFRACOST_API_KEY: ${{ secrets.INFRACOST_API_KEY }}
           # /apply --force: apply even when the plan differs from the reviewed one.
           TFPR_APPLY_FORCE: ${{ needs.resolve.outputs.force }}
+          TFPR_TRIGGER_EVENT: ${{ github.event_name == 'issue_comment' && 'comment' || 'manual' }}
+          TFPR_TRIGGER_COMMAND: ${{ format('/apply{0}{1}', needs.resolve.outputs.project_filter != '' && format(' -p {0}', needs.resolve.outputs.project_filter) || '', needs.resolve.outputs.force == 'true' && ' --force' || '') }}
+          TFPR_TRIGGER_ACTOR: ${{ github.actor }}
           # Cross-PR unit lock ownership (tfpr lock).
           TFPR_LOCK_STORAGE_ACCOUNT: ${{ vars.TFPR_LOCK_STORAGE_ACCOUNT }}
           TFPR_LOCK_TABLE: ${{ vars.TFPR_LOCK_TABLE }}

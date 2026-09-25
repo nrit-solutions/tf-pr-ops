@@ -402,6 +402,7 @@ runs:
         HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
         RUN_ID: ${{ github.run_id }}
         RUN_NUMBER: ${{ github.run_number }}
+        ACTOR: ${{ github.actor }}
       run: |
         mkdir -p .tfpr-dispatch
         jq -n \
@@ -415,6 +416,7 @@ runs:
           --arg head_sha "$HEAD_SHA" \
           --arg check_run_id "$RUN_ID" \
           --arg check_run_number "$RUN_NUMBER" \
+          --arg actor "$ACTOR" \
           '$ARGS.named' > .tfpr-dispatch/context.json
 
     # The context travels in the workflow_dispatch inputs, so the dispatched

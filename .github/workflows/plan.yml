@@ -42,6 +42,16 @@ on:
       check_run_number:
         type: string
         default: ''
+      # What started the run, for the run summary in the check output.
+      trigger_event:
+        type: string
+        default: ''
+      trigger_command:
+        type: string
+        default: ''
+      trigger_actor:
+        type: string
+        default: ''
     secrets:
       ARM_CLIENT_ID:
         required: false
@@ -272,6 +282,10 @@ jobs:
           PROJECT_LABEL: ${{ matrix.project.label }}
           PROJECT_TOOL: ${{ matrix.project.tool }}
           REPORT_FILE: ${{ github.workspace }}/.tfpr/${{ matrix.project.label }}.md
+          CHECK_TEXT_FILE: ${{ github.workspace }}/.tfpr/${{ matrix.project.label }}.check.md
+          TFPR_TRIGGER_EVENT: ${{ inputs.trigger_event }}
+          TFPR_TRIGGER_COMMAND: ${{ inputs.trigger_command }}
+          TFPR_TRIGGER_ACTOR: ${{ inputs.trigger_actor }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           STEPS_JSON: ${{ toJson(matrix.project.steps) }}
           INFRACOST_API_KEY: ${{ secrets.INFRACOST_API_KEY }}
@@ -314,6 +328,7 @@ jobs:
           PROJECT_LABEL: ${{ matrix.project.label }}
           TF_STATUS: ${{ steps.tf.outputs.status }}
           TF_SUMMARY: ${{ steps.tf.outputs.summary }}
+          CHECK_TEXT_FILE: ${{ github.workspace }}/.tfpr/${{ matrix.project.label }}.check.md
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           RUN_ID: ${{ inputs.check_run_id || github.run_id }}
           RUN_NUMBER: ${{ inputs.check_run_number || github.run_number }}

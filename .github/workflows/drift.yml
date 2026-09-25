@@ -47,6 +47,8 @@ on:
         required: false
       INFRACOST_API_KEY:
         required: false
+      TFPR_CHECKS_APP_PRIVATE_KEY:
+        required: false
 
 # Permissions are set per job. resolve does no cloud login, so it must not hold
 # id-token: write: this tenant customizes the OIDC subject to require an
@@ -406,6 +408,9 @@ jobs:
           PROJECT_LABEL: ${{ matrix.project.label }}
           PROJECT_TOOL: ${{ matrix.project.tool }}
           REPORT_FILE: ${{ github.workspace }}/.tfpr/${{ matrix.project.label }}.md
+          CHECK_TEXT_FILE: ${{ github.workspace }}/.tfpr/${{ matrix.project.label }}.check.md
+          TFPR_TRIGGER_EVENT: ${{ github.event_name == 'schedule' && 'schedule' || 'manual' }}
+          TFPR_TRIGGER_ACTOR: ${{ github.event_name != 'schedule' && github.actor || '' }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           STEPS_JSON: ${{ toJson(matrix.project.steps) }}
           INFRACOST_API_KEY: ${{ secrets.INFRACOST_API_KEY }}
@@ -420,14 +425,17 @@ jobs:
         env:
           LABEL: ${{ matrix.project.label }}
           STATUS: ${{ steps.tf.outputs.status }}
+          SUMMARY: ${{ steps.tf.outputs.summary }}
           REPORT_FILE: ${{ github.workspace }}/.tfpr/${{ matrix.project.label }}.md
+          CHECK_TEXT_FILE: ${{ github.workspace }}/.tfpr/${{ matrix.project.label }}.check.md
         run: |
           set -euo pipefail
           mkdir -p drift
           key="${LABEL//\//__}"
-          jq -n --arg label "$LABEL" --arg status "${STATUS:-error}" \
-            '{label: $label, status: $status}' > "drift/${key}.json"
+          jq -n --arg label "$LABEL" --arg status "${STATUS:-error}" --arg summary "$SUMMARY" \
+            '{label: $label, status: $status, summary: $summary}' > "drift/${key}.json"
           [ -f "$REPORT_FILE" ] && cp "$REPORT_FILE" "drift/${key}.md" || true
+          [ -f "$CHECK_TEXT_FILE" ] && cp "$CHECK_TEXT_FILE" "drift/${key}.check.md" || true
 
       - name: Upload drift result
         if: always()
@@ -522,3 +530,33 @@ jobs:
           DRIFT_DIR: drift
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: '"$TFPR_BIN" report-drift-issue'
+
+      # One check run per unit on the default branch commit that was swept,
+      # carrying the run summary a PR check carries. Only through the checks
+      # App: the workflow token would need checks: write from every drift
+      # caller, and without the App the issues remain the whole report.
+      - name: Checks app token
+        id: checks_token
+        if: always() && vars.TFPR_CHECKS_APP_CLIENT_ID != ''
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.TFPR_CHECKS_APP_CLIENT_ID }}
+          private-key: ${{ secrets.TFPR_CHECKS_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+
+      - name: Post drift check runs
+        if: always() && steps.checks_token.outputs.token != ''
+        env:
+          GH_TOKEN: ${{ steps.checks_token.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.sha }}
+          DRIFT_DIR: drift
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_NUMBER: ${{ github.run_number }}
+        run: '"$TFPR_BIN" checks drift'
+
+      - name: Note missing checks app
+        if: always() && vars.TFPR_CHECKS_APP_CLIENT_ID == ''
+        run: echo "::notice::TFPR_CHECKS_APP_CLIENT_ID is not set, so no drift check runs were posted. The drift issues carry the full report."
