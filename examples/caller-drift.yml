@@ -19,4 +19,9 @@ jobs:
     uses: nrit-solutions/tf-pr-ops/.github/workflows/drift.yml@v6.4.0 # x-release-please-version
     with:
       engine_ref: v6.4.0 # must match the uses: ref above; x-release-please-version
-    secrets: inherit
+    # Pass the secrets by name. GitHub drops secrets: inherit when the caller
+    # is in another organization than the reusable workflow.
+    secrets:
+      ENGINE_APP_PRIVATE_KEY: ${{ secrets.ENGINE_APP_PRIVATE_KEY }}
+      TFPR_CHECKS_APP_PRIVATE_KEY: ${{ secrets.TFPR_CHECKS_APP_PRIVATE_KEY }}
+      INFRACOST_API_KEY: ${{ secrets.INFRACOST_API_KEY }}

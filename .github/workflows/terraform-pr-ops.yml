@@ -210,10 +210,19 @@ jobs:
       # that names neither the missing variable nor why the engine needs it. Fail
       # first, with something actionable.
       - name: Check engine credentials
-        if: inputs.engine_ref != '' && vars.ENGINE_APP_CLIENT_ID == ''
+        if: inputs.engine_ref != ''
+        env:
+          ENGINE_APP_CLIENT_ID: ${{ vars.ENGINE_APP_CLIENT_ID }}
+          ENGINE_APP_PRIVATE_KEY: ${{ secrets.ENGINE_APP_PRIVATE_KEY }}
         run: |
-          echo "::error::ENGINE_APP_CLIENT_ID is not set. Reusable mode checks the engine core out of the private nrit-solutions/nrit-tf-pr-ops repository, which needs a GitHub App token minted for that org. Set the ENGINE_APP_CLIENT_ID variable and the ENGINE_APP_PRIVATE_KEY secret; the bootstrap sets both when engine_app_client_id is supplied."
-          exit 1
+          if [[ -z "$ENGINE_APP_CLIENT_ID" ]]; then
+            echo "::error::ENGINE_APP_CLIENT_ID is not set. Reusable mode checks the engine core out of the private nrit-solutions/nrit-tf-pr-ops repository, which needs a GitHub App token minted for that org. Set the ENGINE_APP_CLIENT_ID variable and the ENGINE_APP_PRIVATE_KEY secret; the bootstrap sets both when engine_app_client_id is supplied."
+            exit 1
+          fi
+          if [[ -z "$ENGINE_APP_PRIVATE_KEY" ]]; then
+            echo "::error::ENGINE_APP_PRIVATE_KEY is empty in this run although ENGINE_APP_CLIENT_ID is set. Either the secret is missing on the repository, or the caller did not pass it: GitHub drops secrets: inherit when the caller is in another organization than nrit-solutions, so the ops and drift callers must pass ENGINE_APP_PRIVATE_KEY, TFPR_CHECKS_APP_PRIVATE_KEY and INFRACOST_API_KEY explicitly under secrets:, as the example callers do."
+            exit 1
+          fi
 
       - name: Engine app token
         id: engine_token
@@ -765,7 +774,14 @@ jobs:
       trigger_event: ${{ github.event_name == 'issue_comment' && 'comment' || 'manual' }}
       trigger_command: ${{ format('/plan{0}', needs.resolve.outputs.project_filter != '' && format(' -p {0}', needs.resolve.outputs.project_filter) || '') }}
       trigger_actor: ${{ github.actor }}
-    secrets: inherit
+    # Explicit, not inherit: this workflow runs for callers in any organization.
+    secrets:
+      ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+      ENGINE_APP_PRIVATE_KEY: ${{ secrets.ENGINE_APP_PRIVATE_KEY }}
+      INFRACOST_API_KEY: ${{ secrets.INFRACOST_API_KEY }}
+      TFPR_CHECKS_APP_PRIVATE_KEY: ${{ secrets.TFPR_CHECKS_APP_PRIVATE_KEY }}
 
   # The dispatched plan: the dispatch action already resolved, created the
   # checks and opened the gate, and the run starts here with that context
@@ -797,7 +813,14 @@ jobs:
       check_run_number: ${{ fromJSON(inputs.context || github.event.inputs.context).check_run_number }}
       trigger_event: push
       trigger_actor: ${{ fromJSON(inputs.context || github.event.inputs.context).actor }}
-    secrets: inherit
+    # Explicit, not inherit: this workflow runs for callers in any organization.
+    secrets:
+      ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+      ENGINE_APP_PRIVATE_KEY: ${{ secrets.ENGINE_APP_PRIVATE_KEY }}
+      INFRACOST_API_KEY: ${{ secrets.INFRACOST_API_KEY }}
+      TFPR_CHECKS_APP_PRIVATE_KEY: ${{ secrets.TFPR_CHECKS_APP_PRIVATE_KEY }}
 
   apply:
     # Dependency-ordered apply. Unlike plan, apply cannot fan out into a parallel
@@ -855,6 +878,16 @@ jobs:
       # never fetch private repositories (public AVM sources, vendored policy
       # library), so nothing else authenticates git. Skipped when
       # ENGINE_APP_CLIENT_ID is unset.
+      - name: Check engine credentials
+        if: vars.ENGINE_APP_CLIENT_ID != ''
+        env:
+          ENGINE_APP_PRIVATE_KEY: ${{ secrets.ENGINE_APP_PRIVATE_KEY }}
+        run: |
+          if [[ -z "$ENGINE_APP_PRIVATE_KEY" ]]; then
+            echo "::error::ENGINE_APP_PRIVATE_KEY is empty in this run although ENGINE_APP_CLIENT_ID is set. Either the secret is missing on the repository, or the caller did not pass it: GitHub drops secrets: inherit when the caller is in another organization than nrit-solutions, so the ops and drift callers must pass ENGINE_APP_PRIVATE_KEY, TFPR_CHECKS_APP_PRIVATE_KEY and INFRACOST_API_KEY explicitly under secrets:, as the example callers do."
+            exit 1
+          fi
+
       - name: Engine app token
         id: engine_token
         if: vars.ENGINE_APP_CLIENT_ID != ''
