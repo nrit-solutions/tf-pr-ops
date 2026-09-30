@@ -27,6 +27,20 @@
 #   4. An empty string is a present value. `not tags.owner` passes a tag set to
 #      "", so check the value, not just the key.
 #
+# A rule returns either a plain string or an object. The object form puts the
+# resource address in its own key, so the gate can show it in front of the
+# message instead of inside it:
+#
+#   {"msg": "...", "resource": resource.address, "policy": "tags.owner-required"}
+#
+#   msg       the text the PR comment shows (required)
+#   resource  the resource address, printed in front of msg (optional)
+#   policy    a stable ID for the rule, for your own tracking; conftest keeps
+#             it in its JSON output, the comment does not print it (optional)
+#
+# conftest moves every key except msg into the result's metadata, so any other
+# key you add is kept but not shown.
+#
 # Test a rule against a plan you know should fail before trusting a pass:
 #
 #   conftest test --policy policy --namespace main <plan.json>
@@ -63,16 +77,30 @@ has_value(resource, key) if {
 	value != ""
 }
 
-deny contains msg if {
+deny contains result if {
 	resource := managed_storage_accounts[_]
 	not has_value(resource, "owner")
-	msg := sprintf("%s: storage accounts must set a non-empty 'owner' tag", [resource.address])
+	result := {
+		"msg": "Storage accounts must set a non-empty 'owner' tag",
+		"resource": resource.address,
+		"policy": "tags.owner-required",
+	}
 }
 
-# Advisory: surface any resource that will be destroyed, so a destructive plan
-# is obvious in review. Deliberately not scoped to one resource type.
-warn contains msg if {
+# Advisory: say when a plan destroys anything, so a destructive plan is obvious
+# in review. Deliberately not scoped to one resource type. One summary warning,
+# not one per resource: a 37-resource teardown would otherwise bury every other
+# finding, and the plan output already lists what goes.
+destroyed contains resource.address if {
 	resource := input.resource_changes[_]
 	"delete" in resource.change.actions
-	msg := sprintf("%s will be destroyed", [resource.address])
 }
+
+warn contains msg if {
+	count(destroyed) > 0
+	msg := sprintf("This plan destroys %d %s; check the plan output before you apply", [count(destroyed), noun(count(destroyed))])
+}
+
+noun(n) := "resource" if n == 1
+
+noun(n) := "resources" if n != 1

@@ -5,6 +5,7 @@
 #
 # Also the unit an engine pull request touches when it changes projects.yml:
 # the merge gate counts that file as Terraform and wants a unit planned.
+# It runs no hooks, so its comment shows only the plan output row.
 
 data "azurerm_resource_group" "selftest" {
   name = var.resource_group_name
