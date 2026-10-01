@@ -180,8 +180,9 @@ jobs:
       # the gate refuses a green verdict while any remain.
       unattributed: ${{ steps.ctx.outputs.unattributed }}
       # Units on the base branch that this branch deleted. Reported, not blocked;
-      # removed_explains_tf tells the gate a zero selection was a removal and not
-      # a unit discovery missed.
+      # removed_explains_tf tells the gate a zero selection was a removal, or a
+      # config-only edit that left the unit inventory unchanged, and not a unit
+      # discovery missed.
       removed_units: ${{ steps.ctx.outputs.removed_units }}
       removed_check: ${{ steps.ctx.outputs.removed_check }}
       removed_explains_tf: ${{ steps.ctx.outputs.removed_explains_tf }}
