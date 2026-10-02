@@ -281,8 +281,13 @@ runs:
         owner: ${{ github.repository_owner }}
         repositories: ${{ github.event.repository.name }}
 
+    # No row when nothing plans: there is nothing to apply, so an approval
+    # verdict would only add a red row to a docs-only or removal-only PR.
     - name: Approval check
-      if: steps.parse.outputs.command == 'plan' && steps.pr.outputs.head_sha != ''
+      if: >-
+        steps.parse.outputs.command == 'plan' &&
+        steps.select.outputs.count != '0' &&
+        steps.pr.outputs.head_sha != ''
       shell: bash
       env:
         GH_TOKEN: ${{ steps.checks_token.outputs.token || github.token }}

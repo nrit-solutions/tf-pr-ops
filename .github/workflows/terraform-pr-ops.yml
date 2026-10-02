@@ -560,10 +560,12 @@ jobs:
       # an apply command, so a required-approval ruleset is otherwise invisible
       # until an apply is refused; this runs on plans too, so the requirement
       # is discoverable from the first run. A dispatched run skips it: the
-      # dispatcher already created this head's approval check.
+      # dispatcher already created this head's approval check. A run that
+      # selects nothing skips it too: there is nothing to apply.
       - name: Approval check
         if: >-
           steps.auth.outputs.run == 'true' &&
+          steps.ctx.outputs.count != '0' &&
           steps.parse.outputs.pr_number != '' &&
           steps.pr.outputs.head_sha != ''
         env:
