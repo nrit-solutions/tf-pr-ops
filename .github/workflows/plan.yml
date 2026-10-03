@@ -303,6 +303,11 @@ jobs:
           # Stamps the reviewed-plan summary the report embeds for the apply
           # guard (#186).
           HEAD_SHA: ${{ inputs.head_sha }}
+          # Live progress on the unit's PR check (#331): the check's identity and the token that created it.
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ inputs.check_run_id || github.run_id }}
+          GH_CHECKS_TOKEN: ${{ steps.checks_token.outputs.token || github.token }}
+          TFPR_CHECK_LIVE_LOG: ${{ vars.TFPR_CHECK_LIVE_LOG }}
           # Cross-PR unit lock ownership (tfpr lock). The token lets the lock
           # check whether a lock holder PR is already closed (reclaim).
           GH_TOKEN: ${{ github.token }}

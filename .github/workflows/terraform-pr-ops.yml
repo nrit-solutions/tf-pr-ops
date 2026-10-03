@@ -1054,6 +1054,7 @@ jobs:
           JOB_RUN_ID: ${{ github.run_id }}
           JOB_NAME: apply (dependency order)
           TFPR_MINIMIZE_OUTDATED: ${{ vars.TFPR_MINIMIZE_OUTDATED }}
+          TFPR_CHECK_LIVE_LOG: ${{ vars.TFPR_CHECK_LIVE_LOG }}
           INIT_ARGS: ${{ vars.TFPR_INIT_ARGS }}
           # For consumers that list the cost gate under the apply stage (#264, #270).
           INFRACOST_API_KEY: ${{ secrets.INFRACOST_API_KEY }}
