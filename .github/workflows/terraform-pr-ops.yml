@@ -695,13 +695,12 @@ jobs:
           COMMENT_ID: ${{ github.event.comment.id }}
           PR_NUMBER: ${{ github.event.issue.number }}
           ACTOR: ${{ github.actor }}
-          ASSOCIATION: ${{ github.event.comment.author_association }}
         run: |
           gh api -X POST "repos/${GH_REPO}/issues/comments/${COMMENT_ID}/reactions" \
             -f content=confused >/dev/null || true
           gh api -X POST "repos/${GH_REPO}/issues/${PR_NUMBER}/comments" -f body="$(printf \
-            '🚫 **Command refused**. `@%s` is not authorized to run terraform commands here (author_association: `%s`). Only repository owners, organization members and collaborators can run `/plan` and `/apply`. Ask one of them to run the command.' \
-            "$ACTOR" "$ASSOCIATION")" >/dev/null
+            '🚫 **Command refused**: `@%s` is not authorized to run Terraform commands here. Only repository owners, organization members and collaborators can run `/plan` and `/apply`. Ask one of them to run the command.' \
+            "$ACTOR")" >/dev/null
 
       # Answer /help without discovery, cloud credentials, or an engine
       # checkout. The job gate above sends an unauthorized /help to the refusal
