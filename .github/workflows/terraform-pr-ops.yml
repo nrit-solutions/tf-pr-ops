@@ -1,10 +1,11 @@
 name: terraform-pr-ops
 
 # The ops half of the engine: comment commands and dispatched work. The
-# pull_request path lives in the dispatch composite action
-# (.github/actions/dispatch), which resolves the PR, creates the App-owned
-# check runs, and dispatches the plan work here; that split keeps every
-# native row of this workflow off the PR.
+# pull_request path is the dispatch composite action (.github/actions/dispatch),
+# which only dispatches this workflow on the default branch with the PR number;
+# that split keeps every native row of this workflow off the PR. Everything
+# that decides or writes a check runs here, from the default branch, because
+# a pull_request run executes the PR branch's own workflow file (#348).
 #   - commenting "/plan" re-plans (optionally "/plan -p <name>")
 #   - commenting "/apply" applies (optionally "/apply -p <name>")
 #   - commenting "/unlock" force-releases the PR's unit locks; the PR
@@ -28,28 +29,18 @@ on:
       project:
         description: project name (blank = all)
         required: false
-      # The dispatch action resolves the PR, creates the check runs, and
-      # dispatches this workflow with these inputs, so the plan work runs
-      # outside the PR-associated run. Never set them by hand; a dispatched
-      # run that was lost (queue loss) is re-run by pushing again or
-      # commenting /plan, not by re-dispatch.
+      # The run resolves the PR from the API; nothing it decides comes from
+      # these inputs. A dispatch by hand works like a /plan comment.
       pr_number:
-        description: set by the engine on a dispatched plan or an unlock
+        description: the pull request to plan, apply or unlock
         required: false
-      head_sha:
-        description: set by the engine on a dispatched plan
+      # Hints from the dispatch action, for wording and for spotting an
+      # apply still running on the previous head (#290). Never trusted.
+      before_sha:
+        description: set by the engine on a push; the previous PR head
         required: false
-      dispatch_run_id:
-        description: set by the engine on a dispatched plan
-        required: false
-      dispatch_run_number:
-        description: set by the engine on a dispatched plan
-        required: false
-      # The resolved plan context as JSON (projects, head SHA, check stamp,
-      # gate inputs). It starts the run at the plan job: resolve does not run
-      # on a dispatched plan.
-      context:
-        description: set by the engine on a dispatched plan
+      trigger_actor:
+        description: set by the engine on a push; who pushed
         required: false
   # Reusable mode: a consumer repo calls this workflow with `uses:` and passes
   # engine_ref (the nrit-tf-pr-ops ref to run scripts from). A non-empty engine_ref
@@ -68,21 +59,15 @@ on:
         description: "nrit-tf-pr-ops ref to check out for engine scripts; must match the caller's uses: ref"
         type: string
         required: true
-      # Dispatched-plan context, forwarded verbatim by the caller from its
-      # own workflow_dispatch inputs (see those inputs above).
+      # Forwarded verbatim by the caller from its own workflow_dispatch
+      # inputs (see those inputs above).
       pr_number:
         type: string
         default: ''
-      head_sha:
+      before_sha:
         type: string
         default: ''
-      dispatch_run_id:
-        type: string
-        default: ''
-      dispatch_run_number:
-        type: string
-        default: ''
-      context:
+      trigger_actor:
         type: string
         default: ''
     secrets:
@@ -120,10 +105,6 @@ env:
   # those pinned versions win (see .github/actions/setup-tools).
   FALLBACK_TERRAFORM_VERSION: "1.9.8"
   FALLBACK_TERRAGRUNT_VERSION: "1.1.2"
-  # The dispatched plan context for the jobs that read it through env;
-  # `{}` when this is not a dispatched plan, so fromJSON never sees an
-  # empty string. Job-level `if:` cannot read env and spells it out.
-  TFPR_DISPATCH_CONTEXT: ${{ inputs.context || github.event.inputs.context || '{}' }}
 
 jobs:
   resolve:
@@ -148,11 +129,7 @@ jobs:
     # below. The commands that change something are then re-checked against the
     # commenter's real repository permission by the Authorize command step; an
     # expression cannot call the API, so that part cannot live here.
-    #
-    # A dispatched plan carries its resolved context in the inputs and starts
-    # at the plan-dispatched job below; nothing here would run for it.
     if: >-
-      (inputs.context || github.event.inputs.context) == '' &&
       github.event.repository.is_template != true &&
       (github.event_name != 'issue_comment' ||
        (github.event.issue.pull_request != null &&
@@ -163,6 +140,9 @@ jobs:
     # Discovery and gh calls only; no Azure. Runs on a hosted runner so it never
     # waits on the (constrained, network-scoped) self-hosted runner that run/apply use.
     runs-on: ubuntu-latest
+    # For the checks App key, which lives in the environments that only the
+    # default branch can use; no id-token, so no Azure identity comes with it.
+    environment: ${{ vars.TFPR_PLAN_ENVIRONMENT || 'plan' }}
     outputs:
       # Not steps.parse.outputs.run: the authorize step passes that through, or
       # turns it off when the commenter may not run the command.
@@ -187,8 +167,8 @@ jobs:
       removed_check: ${{ steps.ctx.outputs.removed_check }}
       removed_explains_tf: ${{ steps.ctx.outputs.removed_explains_tf }}
       head_sha: ${{ steps.ctx.outputs.head_sha }}
-      # The run identity stamped on the PR check runs; the dispatcher's on a
-      # dispatched plan, so completion and both sweeps match what was created.
+      # The run identity stamped on the PR check runs, so completion and both
+      # sweeps match what was created.
       check_run_id: ${{ steps.ctx.outputs.check_run_id }}
       check_run_number: ${{ steps.ctx.outputs.check_run_number }}
       approved: ${{ steps.approval.outputs.approved }}
@@ -286,7 +266,6 @@ jobs:
           DISPATCH_COMMAND: ${{ inputs.command || github.event.inputs.command }}
           DISPATCH_PROJECT: ${{ inputs.project || github.event.inputs.project }}
           DISPATCH_PR: ${{ inputs.pr_number || github.event.inputs.pr_number }}
-          DISPATCH_RUN_ID: ${{ inputs.dispatch_run_id || github.event.inputs.dispatch_run_id }}
         run: '"$TFPR_BIN" parse-event'
 
       # The job filter above proves standing in the organization, not write access
@@ -357,18 +336,16 @@ jobs:
           CONFIG_FILE: ${{ env.CONFIG_FILE }}
         run: '"$TFPR_BIN" changed-files'
 
-      # On the issue_comment path the workspace holds the default branch, so a unit
-      # that exists only on the PR branch is invisible to terragrunt discovery. Check
-      # out the PR head into the working tree (as data to discover; the engine stays
-      # pinned in .tfpr-engine) so net-new units are seen. This mirrors the dispatch
-      # action, whose pull_request checkout already yields PR code; resolve holds no
-      # id-token, so no privilege is widened. A plain git checkout is used, not a
-      # second actions/checkout, whose git clean would wipe .tfpr-engine.
-      - name: Checkout PR head for discovery (comment path)
+      # The workspace holds the default branch, so a unit that exists only on the
+      # PR branch is invisible to terragrunt discovery. Check out the PR head into
+      # the working tree (as data to discover; the engine stays pinned in
+      # .tfpr-engine) so net-new units are seen. Resolve holds no id-token, so no
+      # Azure privilege is widened. A plain git checkout is used, not a second
+      # actions/checkout, whose git clean would wipe .tfpr-engine.
+      - name: Checkout PR head for discovery
         if: >-
           steps.auth.outputs.run == 'true' &&
-          steps.parse.outputs.command != 'unlock' &&
-          github.event_name == 'issue_comment'
+          steps.parse.outputs.command != 'unlock'
         env:
           PR_NUMBER: ${{ steps.parse.outputs.pr_number }}
           HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
@@ -559,9 +536,8 @@ jobs:
       # check run, created completed. The approval gate above only evaluates on
       # an apply command, so a required-approval ruleset is otherwise invisible
       # until an apply is refused; this runs on plans too, so the requirement
-      # is discoverable from the first run. A dispatched run skips it: the
-      # dispatcher already created this head's approval check. A run that
-      # selects nothing skips it too: there is nothing to apply.
+      # is discoverable from the first run. A run that selects nothing skips
+      # it: there is nothing to apply.
       - name: Approval check
         if: >-
           steps.auth.outputs.run == 'true' &&
@@ -586,13 +562,11 @@ jobs:
       # PR, replacing the ruleset's "Expected" placeholder, and is completed by
       # the gate job of whichever run owns the results. The binary skips
       # filtered runs (a diagnostic must not reopen the gate); the conditions
-      # skip refused applies (nothing would complete it), the unlock path, and
-      # dispatched runs (the dispatch action already opened it).
+      # skip refused applies (nothing would complete it) and the unlock path.
       - name: Open merge gate
         id: gate_pending
         if: >-
           steps.auth.outputs.run == 'true' &&
-          github.event_name == 'issue_comment' &&
           steps.parse.outputs.command != 'unlock' &&
           steps.pr.outputs.head_sha != '' &&
           steps.approval.outputs.approved != 'false'
@@ -605,15 +579,16 @@ jobs:
           PROJECT_FILTER: ${{ steps.parse.outputs.project_filter }}
         run: '"$TFPR_BIN" checks gate-pending'
 
-      # Engine work still running on this head (a /plan or /apply while an
-      # earlier run is on the runner). The plan or apply job below queues
-      # behind it on the PR's concurrency group, and the checks created
-      # next say so instead of sitting in progress unexplained (#290).
+      # Engine work still running on this pull request: a /plan or /apply on
+      # this head, or an apply of the previous head that a push left behind
+      # (the dispatch action's before_sha hint; check runs stay on a commit
+      # even after a force-push drops it). The plan or apply job below queues
+      # behind it on the PR's concurrency group, and the checks created next
+      # say so instead of sitting in progress unexplained (#290).
       - name: Find running work
         id: running
         if: >-
           steps.auth.outputs.run == 'true' &&
-          github.event_name == 'issue_comment' &&
           steps.select.outputs.count != '0' &&
           steps.pr.outputs.head_sha != '' &&
           steps.approval.outputs.approved != 'false'
@@ -621,12 +596,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+          BEFORE_SHA: ${{ inputs.before_sha || github.event.inputs.before_sha }}
         run: '"$TFPR_BIN" checks running'
 
-      # Comment runs get engine-created check runs on the head commit, one
-      # per project, completed in-run; the run itself is not attached to the
-      # PR at all. Dispatched runs complete the checks the dispatch action
-      # created instead of creating their own.
+      # Engine-created check runs on the head commit, one per project,
+      # completed in-run; the run itself is not attached to the PR at all.
       # Visibility only: the call is best effort and the step cannot fail the
       # job, so a check-runs API outage never takes the merge gate with it.
       - name: Create PR checks
@@ -634,7 +608,6 @@ jobs:
         continue-on-error: true
         if: >-
           steps.auth.outputs.run == 'true' &&
-          github.event_name == 'issue_comment' &&
           steps.select.outputs.count != '0' &&
           steps.pr.outputs.head_sha != '' &&
           steps.approval.outputs.approved != 'false'
@@ -773,48 +746,11 @@ jobs:
       head_sha: ${{ needs.resolve.outputs.head_sha }}
       check_run_id: ${{ needs.resolve.outputs.check_run_id }}
       check_run_number: ${{ needs.resolve.outputs.check_run_number }}
-      trigger_event: ${{ github.event_name == 'issue_comment' && 'comment' || 'manual' }}
-      trigger_command: ${{ format('/plan{0}', needs.resolve.outputs.project_filter != '' && format(' -p {0}', needs.resolve.outputs.project_filter) || '') }}
-      trigger_actor: ${{ github.actor }}
-    # Explicit, not inherit: this workflow runs for callers in any organization.
-    secrets:
-      ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
-      ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
-      ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
-      ENGINE_APP_PRIVATE_KEY: ${{ secrets.ENGINE_APP_PRIVATE_KEY }}
-      INFRACOST_API_KEY: ${{ secrets.INFRACOST_API_KEY }}
-      TFPR_CHECKS_APP_PRIVATE_KEY: ${{ secrets.TFPR_CHECKS_APP_PRIVATE_KEY }}
-
-  # The dispatched plan: the dispatch action already resolved, created the
-  # checks and opened the gate, and the run starts here with that context
-  # from its inputs, so no hosted job sits in front of the plan legs. The
-  # dispatcher only dispatches a non-zero selection; the count test is a
-  # guard against a hand-made dispatch.
-  plan-dispatched:
-    name: plan
-    if: >-
-      github.event.repository.is_template != true &&
-      (inputs.context || github.event.inputs.context) != '' &&
-      fromJSON(inputs.context || github.event.inputs.context).count != '0'
-    permissions:
-      contents: read
-      id-token: write        # Azure OIDC login
-      pull-requests: write   # post the run report
-      checks: write          # complete the pre-created PR check
-    concurrency:
-      group: tfpr-pr-${{ inputs.pr_number || github.event.inputs.pr_number }}
-      cancel-in-progress: false
-    uses: ./.github/workflows/plan.yml
-    with:
-      engine_ref: ${{ inputs.engine_ref }}
-      command: plan
-      projects: ${{ fromJSON(inputs.context || github.event.inputs.context).projects }}
-      pr_number: ${{ inputs.pr_number || github.event.inputs.pr_number }}
-      head_sha: ${{ fromJSON(inputs.context || github.event.inputs.context).head_sha }}
-      check_run_id: ${{ fromJSON(inputs.context || github.event.inputs.context).check_run_id }}
-      check_run_number: ${{ fromJSON(inputs.context || github.event.inputs.context).check_run_number }}
-      trigger_event: push
-      trigger_actor: ${{ fromJSON(inputs.context || github.event.inputs.context).actor }}
+      # A push is a dispatch carrying the trigger_actor hint; a dispatch by
+      # hand carries none.
+      trigger_event: ${{ github.event_name == 'issue_comment' && 'comment' || ((inputs.trigger_actor || github.event.inputs.trigger_actor) != '' && 'push' || 'manual') }}
+      trigger_command: ${{ (github.event_name == 'issue_comment' || (inputs.trigger_actor || github.event.inputs.trigger_actor) == '') && format('/plan{0}', needs.resolve.outputs.project_filter != '' && format(' -p {0}', needs.resolve.outputs.project_filter) || '') || '' }}
+      trigger_actor: ${{ inputs.trigger_actor || github.event.inputs.trigger_actor || github.actor }}
     # Explicit, not inherit: this workflow runs for callers in any organization.
     secrets:
       ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
@@ -900,7 +836,7 @@ jobs:
           owner: ${{ env.TFPR_ENGINE_OWNER }}
 
       - name: Azure login (OIDC)
-        uses: azure/login@f5d393ae46f8fde4be8b75f32e3fc50e654ad0ca # v3.0.1
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID || secrets.ARM_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID || secrets.ARM_TENANT_ID }}
@@ -1153,7 +1089,7 @@ jobs:
           echo "TFPR_BIN=$RUNNER_TEMP/tfpr" >>"$GITHUB_ENV"
 
       - name: Azure login (OIDC)
-        uses: azure/login@f5d393ae46f8fde4be8b75f32e3fc50e654ad0ca # v3.0.1
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID || secrets.ARM_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID || secrets.ARM_TENANT_ID }}
@@ -1181,18 +1117,16 @@ jobs:
   # Aggregate per-project outcomes into the stable tf-pr-ops / merge-gate
   # check that gates merge. Make it a required check in the ruleset.
   gate:
-    needs: [resolve, plan, plan-dispatched, apply]
-    # On a dispatched plan resolve never runs and the gate reads the
-    # dispatch inputs instead (TFPR_DISPATCH_CONTEXT); that also covers a
-    # dispatched run whose plan died, so the sweep below can still cancel
-    # the dispatcher's checks.
+    needs: [resolve, plan, apply]
+    # Every verdict input comes from resolve, which read it from the API in
+    # this run; no dispatch input reaches the gate (#348).
     if: >-
       always() &&
-      ((needs.resolve.outputs.run == 'true' && needs.resolve.outputs.head_sha != '') ||
-       (github.event_name == 'workflow_dispatch' &&
-        (inputs.dispatch_run_id || github.event.inputs.dispatch_run_id) != ''))
+      needs.resolve.outputs.run == 'true' && needs.resolve.outputs.head_sha != ''
     # Status aggregation via gh only; no Azure. Hosted runner (see resolve).
     runs-on: ubuntu-latest
+    # The checks App key, as in resolve.
+    environment: ${{ vars.TFPR_PLAN_ENVIRONMENT || 'plan' }}
     env:
       TFPR_ENGINE_DIR: ${{ inputs.engine_ref != '' && format('{0}/.tfpr-engine', github.workspace) || github.workspace }}
     steps:
@@ -1269,7 +1203,7 @@ jobs:
           repositories: ${{ github.event.repository.name }}
 
       - name: Download gate results
-        if: (needs.resolve.outputs.count || fromJSON(env.TFPR_DISPATCH_CONTEXT).count) != '0'
+        if: needs.resolve.outputs.count != '0'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: gate-*
@@ -1277,27 +1211,23 @@ jobs:
           merge-multiple: true
       # Complete the pending gate check with the verdict (or create it
       # completed when this run never opened one). The run id is the check
-      # stamp: the dispatch action's on a dispatched plan, this run's
-      # otherwise. This must run before the leftover sweep below, which
-      # cancels any still-open check under the same stamp.
+      # stamp. This must run before the leftover sweep below, which cancels
+      # any still-open check under the same stamp.
       - name: Complete merge gate
-        if: >-
-          (needs.resolve.outputs.run == 'true' && needs.resolve.outputs.head_sha != '') ||
-          (inputs.context || github.event.inputs.context) != ''
         env:
           GH_TOKEN: ${{ steps.checks_token.outputs.token || github.token }}
           GH_REPO: ${{ github.repository }}
-          HEAD_SHA: ${{ needs.resolve.outputs.head_sha || fromJSON(env.TFPR_DISPATCH_CONTEXT).head_sha }}
-          COMMAND: ${{ needs.resolve.outputs.command || 'plan' }}
-          COUNT: ${{ needs.resolve.outputs.count || fromJSON(env.TFPR_DISPATCH_CONTEXT).count }}
-          TF_CHANGED: ${{ needs.resolve.outputs.tf_changed || fromJSON(env.TFPR_DISPATCH_CONTEXT).tf_changed }}
-          UNATTRIBUTED: ${{ needs.resolve.outputs.unattributed || fromJSON(env.TFPR_DISPATCH_CONTEXT).unattributed }}
+          HEAD_SHA: ${{ needs.resolve.outputs.head_sha }}
+          COMMAND: ${{ needs.resolve.outputs.command }}
+          COUNT: ${{ needs.resolve.outputs.count }}
+          TF_CHANGED: ${{ needs.resolve.outputs.tf_changed }}
+          UNATTRIBUTED: ${{ needs.resolve.outputs.unattributed }}
           PROJECT_FILTER: ${{ needs.resolve.outputs.project_filter }}
-          REMOVED_UNITS: ${{ needs.resolve.outputs.removed_units || fromJSON(env.TFPR_DISPATCH_CONTEXT).removed_units }}
-          REMOVED_CHECK: ${{ needs.resolve.outputs.removed_check || fromJSON(env.TFPR_DISPATCH_CONTEXT).removed_check }}
-          REMOVED_EXPLAINS_TF: ${{ needs.resolve.outputs.removed_explains_tf || fromJSON(env.TFPR_DISPATCH_CONTEXT).removed_explains_tf }}
+          REMOVED_UNITS: ${{ needs.resolve.outputs.removed_units }}
+          REMOVED_CHECK: ${{ needs.resolve.outputs.removed_check }}
+          REMOVED_EXPLAINS_TF: ${{ needs.resolve.outputs.removed_explains_tf }}
           RESULT_DIR: gate
-          RUN_ID: ${{ needs.resolve.outputs.check_run_id || fromJSON(env.TFPR_DISPATCH_CONTEXT).check_run_id }}
+          RUN_ID: ${{ needs.resolve.outputs.check_run_id }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: '"$TFPR_BIN" merge-gate'
 
@@ -1305,19 +1235,13 @@ jobs:
       # in_progress under this run's stamp belongs to a job that never got
       # there (runner offline, environment approval denied, canceled). Complete
       # those as canceled; a check that never completes blocks merge forever.
-      # Best effort, and runs even when the gate status above failed. On a
-      # dispatched plan the stamp is the dispatcher's run id, from the
-      # dispatch inputs.
+      # Best effort, and runs even when the gate status above failed.
       - name: Cancel leftover PR checks
-        if: >-
-          always() &&
-          (github.event_name == 'issue_comment' ||
-           (github.event_name == 'workflow_dispatch' &&
-            (inputs.dispatch_run_id || github.event.inputs.dispatch_run_id) != ''))
+        if: always()
         env:
           GH_TOKEN: ${{ steps.checks_token.outputs.token || github.token }}
           GH_REPO: ${{ github.repository }}
-          HEAD_SHA: ${{ needs.resolve.outputs.head_sha || inputs.head_sha || github.event.inputs.head_sha }}
-          RUN_ID: ${{ needs.resolve.outputs.check_run_id || inputs.dispatch_run_id || github.event.inputs.dispatch_run_id || github.run_id }}
+          HEAD_SHA: ${{ needs.resolve.outputs.head_sha }}
+          RUN_ID: ${{ needs.resolve.outputs.check_run_id }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: '"$TFPR_BIN" checks cancel'

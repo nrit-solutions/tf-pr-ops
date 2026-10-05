@@ -16,10 +16,10 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
 
+# No secrets and no check writes here: this file runs from the PR branch,
+# which any writer can edit, so the ops run on the default branch does both.
 permissions:
   contents: read
-  pull-requests: write
-  checks: write          # the engine-authored check runs, merge gate included
   actions: write         # dispatch the ops workflow
 
 jobs:
@@ -54,12 +54,4 @@ jobs:
     if: github.event.repository.is_template != true
     runs-on: ubuntu-latest
     steps:
-      - uses: nrit-solutions/tf-pr-ops/.github/actions/dispatch@v7.4.1 # x-release-please-version
-        with:
-          checks-app-client-id: ${{ vars.TFPR_CHECKS_APP_CLIENT_ID }}
-          checks-app-private-key: ${{ secrets.TFPR_CHECKS_APP_PRIVATE_KEY }}
-          allow-unreviewed-apply: ${{ vars.TFPR_ALLOW_UNREVIEWED_APPLY }}
-          # Lets the action download the prebuilt tfpr for its pinned tag
-          # instead of building from source. Optional; empty builds.
-          engine-app-client-id: ${{ vars.ENGINE_APP_CLIENT_ID }}
-          engine-app-private-key: ${{ secrets.ENGINE_APP_PRIVATE_KEY }}
+      - uses: nrit-solutions/tf-pr-ops/.github/actions/dispatch@v8.0.0 # x-release-please-version

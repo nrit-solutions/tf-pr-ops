@@ -256,7 +256,7 @@ jobs:
           echo "TFPR_BIN=$RUNNER_TEMP/tfpr" >>"$GITHUB_ENV"
 
       - name: Azure login (OIDC)
-        uses: azure/login@f5d393ae46f8fde4be8b75f32e3fc50e654ad0ca # v3.0.1
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID || secrets.ARM_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID || secrets.ARM_TENANT_ID }}
@@ -330,7 +330,7 @@ jobs:
           owner: ${{ env.TFPR_ENGINE_OWNER }}
 
       - name: Azure login (OIDC)
-        uses: azure/login@f5d393ae46f8fde4be8b75f32e3fc50e654ad0ca # v3.0.1
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID || secrets.ARM_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID || secrets.ARM_TENANT_ID }}
@@ -470,6 +470,8 @@ jobs:
     if: always() && needs.resolve.outputs.count != '0'
     # GitHub API only; no Azure, no state. Hosted runner with gh available.
     runs-on: ubuntu-latest
+    # For the checks App key, which only default-branch runs can read (#348).
+    environment: ${{ vars.TFPR_PLAN_ENVIRONMENT || 'plan' }}
     permissions:
       contents: read
       issues: write

@@ -16,17 +16,13 @@ on:
         default: plan
       project:
         required: false
-      # Set by the engine when the PR caller's dispatch action hands work to
-      # this workflow; never set them by hand.
       pr_number:
         required: false
-      head_sha:
+      # Set by the PR caller's dispatch action on a push. Hints for wording
+      # only; the engine resolves everything it decides from the API.
+      before_sha:
         required: false
-      dispatch_run_id:
-        required: false
-      dispatch_run_number:
-        required: false
-      context:
+      trigger_actor:
         required: false
 
 # The caller grants the ceiling of permissions the reusable workflow's jobs use.
@@ -38,16 +34,14 @@ permissions:
 
 jobs:
   engine:
-    uses: nrit-solutions/tf-pr-ops/.github/workflows/terraform-pr-ops.yml@v7.4.1 # x-release-please-version
+    uses: nrit-solutions/tf-pr-ops/.github/workflows/terraform-pr-ops.yml@v8.0.0 # x-release-please-version
     with:
       command: ${{ inputs.command || 'plan' }}
       project: ${{ inputs.project || '' }}
       pr_number: ${{ inputs.pr_number || '' }}
-      head_sha: ${{ inputs.head_sha || '' }}
-      dispatch_run_id: ${{ inputs.dispatch_run_id || '' }}
-      dispatch_run_number: ${{ inputs.dispatch_run_number || '' }}
-      context: ${{ inputs.context || '' }}
-      engine_ref: v7.4.1 # must match the uses: ref above; x-release-please-version
+      before_sha: ${{ inputs.before_sha || '' }}
+      trigger_actor: ${{ inputs.trigger_actor || '' }}
+      engine_ref: v8.0.0 # must match the uses: ref above; x-release-please-version
     # Pass the secrets by name. GitHub drops secrets: inherit when the caller
     # is in another organization than the reusable workflow.
     secrets:

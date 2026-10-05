@@ -34,8 +34,8 @@ on:
         description: the commit resolve pinned, not the moving PR head ref
         type: string
         required: true
-      # The run identity stamped on the pre-created PR checks: the parent
-      # run's on a comment plan, the dispatcher's on a dispatched plan.
+      # The run identity stamped on the PR checks the parent's resolve job
+      # pre-created.
       check_run_id:
         type: string
         default: ''
@@ -161,7 +161,7 @@ jobs:
           owner: ${{ env.TFPR_ENGINE_OWNER }}
 
       - name: Azure login (OIDC)
-        uses: azure/login@f5d393ae46f8fde4be8b75f32e3fc50e654ad0ca # v3.0.1
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID || secrets.ARM_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID || secrets.ARM_TENANT_ID }}
@@ -327,10 +327,8 @@ jobs:
           TFPR_MINIMIZE_OUTDATED: ${{ vars.TFPR_MINIMIZE_OUTDATED }}
         run: '"$TFPR_BIN" comment'
 
-      # Comment plans and dispatched plans both complete a pre-created check;
-      # a manual dispatch has no PR context (head_sha empty) and skips. The
-      # check identity comes from the inputs, so a dispatched run completes
-      # the checks the dispatcher created.
+      # Complete the check the parent's resolve job pre-created; the check
+      # identity comes from the inputs.
       - name: Complete PR check
         if: >-
           always() && inputs.head_sha != '' &&
