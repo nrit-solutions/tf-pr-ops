@@ -558,9 +558,10 @@ jobs:
         run: '"$TFPR_BIN" approval-status'
 
       # Open the merge gate for this run: the required "tf-pr-ops / merge-gate"
-      # check goes queued ("Waiting for plan") the moment the engine takes the
-      # PR, replacing the ruleset's "Expected" placeholder, and is completed by
-      # the gate job of whichever run owns the results. The binary skips
+      # check goes in progress ("Planning 2 units", "Applying 1 unit") the
+      # moment the engine takes the PR, replacing the ruleset's "Expected"
+      # placeholder, and is completed by the gate job of whichever run owns
+      # the results. The binary skips
       # filtered runs (a diagnostic must not reopen the gate); the conditions
       # skip refused applies (nothing would complete it) and the unlock path.
       - name: Open merge gate
@@ -577,6 +578,8 @@ jobs:
           RUN_ID: ${{ github.run_id }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           PROJECT_FILTER: ${{ steps.parse.outputs.project_filter }}
+          COMMAND: ${{ steps.parse.outputs.command }}
+          COUNT: ${{ steps.ctx.outputs.count }}
         run: '"$TFPR_BIN" checks gate-pending'
 
       # Engine work still running on this pull request: a /plan or /apply on
@@ -1009,7 +1012,9 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: gate-apply
-          path: gate/*.status
+          path: |
+            gate/*.status
+            gate/*.lock
           retention-days: 1
 
   # Release every cross-PR unit lock the PR holds. Two triggers land here: the

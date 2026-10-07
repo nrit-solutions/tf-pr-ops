@@ -339,7 +339,7 @@ jobs:
           HEAD_SHA: ${{ inputs.head_sha }}
           COMMAND: ${{ inputs.command }}
           PROJECT_LABEL: ${{ matrix.project.label }}
-          TF_STATUS: ${{ steps.tf.outputs.status }}
+          TF_STATUS: ${{ steps.tf.outcome == 'cancelled' && 'cancelled' || steps.tf.outputs.status }}
           TF_SUMMARY: ${{ steps.tf.outputs.summary }}
           CHECK_TEXT_FILE: ${{ github.workspace }}/.tfpr/${{ matrix.project.label }}.check.md
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -352,22 +352,29 @@ jobs:
 
       # Record this project's outcome for the merge-gate aggregation. The gate
       # job is in the parent workflow; artifacts are scoped to the whole run, so
-      # it still finds these.
+      # it still finds these. A cancelled step has no status output; recording
+      # it as cancelled keeps it from reading as a plan error.
       - name: Record gate result
         if: always()
         env:
           LABEL: ${{ matrix.project.label }}
-          STATUS: ${{ steps.tf.outputs.status }}
+          STATUS: ${{ steps.tf.outcome == 'cancelled' && 'cancelled' || steps.tf.outputs.status }}
+          LOCK_HOLDER: ${{ steps.tf.outputs.lock_holder }}
         run: |
           mkdir -p gate
           printf '%s' "${STATUS:-error}" > "gate/${LABEL//\//__}.status"
+          if [ -n "$LOCK_HOLDER" ]; then
+            printf '%s' "$LOCK_HOLDER" > "gate/${LABEL//\//__}.lock"
+          fi
 
       - name: Upload gate result
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: gate-${{ strategy.job-index }}
-          path: gate/*.status
+          path: |
+            gate/*.status
+            gate/*.lock
           retention-days: 1
 
       # locked does not fail the job: a lock is contention, not a defect, and
