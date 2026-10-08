@@ -159,6 +159,10 @@ jobs:
       # Changed Terraform paths no selected unit accounts for (JSON array);
       # the gate refuses a green verdict while any remain.
       unattributed: ${{ steps.ctx.outputs.unattributed }}
+      # A filtered run's unfiltered selection and its unattributed paths; empty
+      # on a full run.
+      full_projects: ${{ steps.full_select.outputs.projects }}
+      full_unattributed: ${{ steps.full_select.outputs.unattributed }}
       # Units on the base branch that this branch deleted. Reported, not blocked;
       # removed_explains_tf tells the gate a zero selection was a removal, or a
       # config-only edit that left the unit inventory unchanged, and not a unit
@@ -396,6 +400,20 @@ jobs:
           # The removed-unit check reuses this inventory instead of
           # re-discovering the PR tree.
           TFPR_UNITS_FILE: ${{ runner.temp }}/tfpr-head-units.json
+        run: '"$TFPR_BIN" discover'
+
+      # A filtered run's gate judges every unit the PR impacts, not just the one
+      # the selector named (#360), so discover that set too, without the filter.
+      - name: Select the full impacted set
+        id: full_select
+        if: >-
+          steps.auth.outputs.run == 'true' &&
+          steps.parse.outputs.command != 'unlock' &&
+          steps.parse.outputs.project_filter != ''
+        env:
+          CONFIG_FILE: ${{ env.CONFIG_FILE }}
+          CHANGED_FILES: ${{ steps.changed.outputs.files }}
+          COMMAND: ${{ steps.parse.outputs.command }}
         run: '"$TFPR_BIN" discover'
 
       # Discovery walks the PR tree, so a unit directory deleted on this branch is
@@ -1228,6 +1246,10 @@ jobs:
           TF_CHANGED: ${{ needs.resolve.outputs.tf_changed }}
           UNATTRIBUTED: ${{ needs.resolve.outputs.unattributed }}
           PROJECT_FILTER: ${{ needs.resolve.outputs.project_filter }}
+          FULL_PROJECTS: ${{ needs.resolve.outputs.full_projects }}
+          FULL_UNATTRIBUTED: ${{ needs.resolve.outputs.full_unattributed }}
+          # Only rows this App wrote may decide a filtered run's gate.
+          CHECKS_APP_SLUG: ${{ steps.checks_token.outputs.app-slug }}
           REMOVED_UNITS: ${{ needs.resolve.outputs.removed_units }}
           REMOVED_CHECK: ${{ needs.resolve.outputs.removed_check }}
           REMOVED_EXPLAINS_TF: ${{ needs.resolve.outputs.removed_explains_tf }}
