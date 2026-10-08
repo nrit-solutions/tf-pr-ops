@@ -1,8 +1,8 @@
 # Ops caller for tf-pr-ops: comment commands and dispatched work. Copy to a
 # consumer repo as .github/workflows/tf-pr-ops.yml, next to tf-pr-ops-pr.yml
 # (the PR caller) and drift.yml. This file is stable: engine changes never
-# need a caller edit. Bump the two version pins (the uses: ref and
-# engine_ref) together to move to a new engine release.
+# need a caller edit. Bump the uses: ref to move to a new engine release;
+# the jobs install the runtime of that release.
 name: tf-pr-ops ops
 
 on:
@@ -34,17 +34,15 @@ permissions:
 
 jobs:
   engine:
-    uses: nrit-solutions/tf-pr-ops/.github/workflows/terraform-pr-ops.yml@v8.1.0 # x-release-please-version
+    uses: nrit-solutions/tf-pr-ops/.github/workflows/terraform-pr-ops.yml@v9.0.0 # x-release-please-version
     with:
       command: ${{ inputs.command || 'plan' }}
       project: ${{ inputs.project || '' }}
       pr_number: ${{ inputs.pr_number || '' }}
       before_sha: ${{ inputs.before_sha || '' }}
       trigger_actor: ${{ inputs.trigger_actor || '' }}
-      engine_ref: v8.1.0 # must match the uses: ref above; x-release-please-version
     # Pass the secrets by name. GitHub drops secrets: inherit when the caller
     # is in another organization than the reusable workflow.
     secrets:
-      ENGINE_APP_PRIVATE_KEY: ${{ secrets.ENGINE_APP_PRIVATE_KEY }}
       TFPR_CHECKS_APP_PRIVATE_KEY: ${{ secrets.TFPR_CHECKS_APP_PRIVATE_KEY }}
       INFRACOST_API_KEY: ${{ secrets.INFRACOST_API_KEY }}

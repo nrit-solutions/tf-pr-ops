@@ -23,13 +23,15 @@ infrastructure repository and pin all of them to one tag:
 | `caller-tf-pr-ops.yml` | comment commands (`/plan`, `/apply`, `/unlock`) and dispatched work |
 | `caller-drift.yml` | the scheduled drift sweep |
 
-The `uses:` ref and the `engine_ref` input carry the same exact version, and
-both move together on every upgrade. Tags are immutable; there is no moving
-major tag.
+The `uses:` ref is the only pin. Each job installs the runtime attached to
+the release of that tag: tfpr, the bundled gate scripts and setup-tools,
+checked against `SHA256SUMS`. Tags are immutable; there is no moving major
+tag.
 
 The callers need the variables and secrets the bootstrap sets on a generated
-repository, including `ENGINE_APP_CLIENT_ID` and `ENGINE_APP_PRIVATE_KEY`
-for the engine App. Setup, commands, gates, and operations are documented at
+repository, including the `TFPR_LICENSE` and `TFPR_ENTITLEMENT` repository
+variables (see
+https://docs.nrit.cloud/operations/license/). Setup, commands, gates, and operations are documented at
 https://docs.nrit.cloud.
 
 ## About this repository

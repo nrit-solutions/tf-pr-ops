@@ -42,9 +42,9 @@ on:
       trigger_actor:
         description: set by the engine on a push; who pushed
         required: false
-  # Reusable mode: a consumer repo calls this workflow with `uses:` and passes
-  # engine_ref (the nrit-tf-pr-ops ref to run scripts from). A non-empty engine_ref
-  # is the mode detector; on every other trigger inputs.engine_ref is empty.
+  # Reusable mode: a consumer repo calls this workflow with `uses:` at a
+  # release tag of the public entrypoint repo, and every job installs the
+  # runtime of that release (job.workflow_ref).
   workflow_call:
     inputs:
       command:
@@ -55,10 +55,6 @@ on:
         description: project name (blank = all)
         type: string
         default: ''
-      engine_ref:
-        description: "nrit-tf-pr-ops ref to check out for engine scripts; must match the caller's uses: ref"
-        type: string
-        required: true
       # Forwarded verbatim by the caller from its own workflow_dispatch
       # inputs (see those inputs above).
       pr_number:
@@ -71,14 +67,6 @@ on:
         type: string
         default: ''
     secrets:
-      ARM_CLIENT_ID:
-        required: false
-      ARM_TENANT_ID:
-        required: false
-      ARM_SUBSCRIPTION_ID:
-        required: false
-      ENGINE_APP_PRIVATE_KEY:
-        required: false
       INFRACOST_API_KEY:
         required: false
       TFPR_CHECKS_APP_PRIVATE_KEY:
@@ -94,12 +82,6 @@ permissions:
   checks: write          # the engine-authored check runs, merge gate included
 
 env:
-  # The private core every job checks out and downloads tfpr from. Fixed:
-  # the core exists only in this org, and the engine App token is minted for
-  # its owner so a caller in any org reads it. TFPR_ENGINE_REPO also feeds
-  # scripts/install-tfpr.sh.
-  TFPR_ENGINE_OWNER: nrit-solutions
-  TFPR_ENGINE_REPO: nrit-solutions/nrit-tf-pr-ops
   CONFIG_FILE: projects.yml
   # Used only when the repo has no version manager (mise/asdf). When it does,
   # those pinned versions win (see .github/actions/setup-tools).
@@ -112,8 +94,8 @@ jobs:
     #
     # A template repository holds no infrastructure and has no bootstrap-created
     # variables or secrets, so plan and apply cannot work there. Skipping keeps its
-    # own pull requests green instead of failing every one on the missing engine
-    # app credentials. A repository generated from a template is not itself a
+    # own pull requests green instead of failing every one on the missing
+    # variables. A repository generated from a template is not itself a
     # template, so this never skips a customer repo. If the event payload carries
     # no repository object the comparison is false and the job runs, which fails
     # safe.
@@ -178,86 +160,43 @@ jobs:
       approved: ${{ steps.approval.outputs.approved }}
       # The apply job's whole condition, decided by tfpr apply-allowed below.
       apply_allowed: ${{ steps.apply_gate.outputs.apply_allowed }}
-    env:
-      # Vendored mode: engine scripts live in the workspace. Reusable mode: they
-      # are checked out to .tfpr-engine at the pinned engine_ref.
-      TFPR_ENGINE_DIR: ${{ inputs.engine_ref != '' && format('{0}/.tfpr-engine', github.workspace) || github.workspace }}
+      # Where the revocation list in the tfpr-license artifact came from (#350).
+      license_list_source: ${{ steps.license.outputs.list_source }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
-      # Reusable mode only: fetch the engine at the pinned ref into .tfpr-engine so
-      # trusted jobs run scripts from that ref, never from PR-branch code. This is a
-      # trusted job: it mints a read-only app token and holds no id-token.
-      #
-      # create-github-app-token fails with a generic "client-id must be set" error
-      # that names neither the missing variable nor why the engine needs it. Fail
-      # first, with something actionable.
-      - name: Check engine credentials
-        if: inputs.engine_ref != ''
+      # Reusable mode: install the runtime published with the release that
+      # holds this workflow file (job.workflow_ref), from the public
+      # entrypoint repo; no token, no private checkout. Vendored mode (the
+      # engine repository itself) builds tfpr from its own checkout.
+      - name: Install the engine runtime
+        if: job.workflow_repository != github.repository
         env:
-          ENGINE_APP_CLIENT_ID: ${{ vars.ENGINE_APP_CLIENT_ID }}
-          ENGINE_APP_PRIVATE_KEY: ${{ secrets.ENGINE_APP_PRIVATE_KEY }}
+          GH_TOKEN: ${{ github.token }}
+          TFPR_RUNTIME_REPO: ${{ job.workflow_repository }}
+          TFPR_RUNTIME_REF: ${{ job.workflow_ref }}
+          TFPR_RUNTIME_SHA: ${{ job.workflow_sha }}
         run: |
-          if [[ -z "$ENGINE_APP_CLIENT_ID" ]]; then
-            echo "::error::ENGINE_APP_CLIENT_ID is not set. Reusable mode checks the engine core out of the private nrit-solutions/nrit-tf-pr-ops repository, which needs a GitHub App token minted for that org. Set the ENGINE_APP_CLIENT_ID variable and the ENGINE_APP_PRIVATE_KEY secret; the bootstrap sets both when engine_app_client_id is supplied."
-            exit 1
-          fi
-          if [[ -z "$ENGINE_APP_PRIVATE_KEY" ]]; then
-            echo "::error::ENGINE_APP_PRIVATE_KEY is empty in this run although ENGINE_APP_CLIENT_ID is set. Either the secret is missing on the repository, or the caller did not pass it: GitHub drops secrets: inherit when the caller is in another organization than nrit-solutions, so the ops and drift callers must pass ENGINE_APP_PRIVATE_KEY, TFPR_CHECKS_APP_PRIVATE_KEY and INFRACOST_API_KEY explicitly under secrets:, as the example callers do."
-            exit 1
-          fi
-
-      - name: Engine app token
-        id: engine_token
-        if: inputs.engine_ref != ''
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          client-id: ${{ vars.ENGINE_APP_CLIENT_ID }}
-          private-key: ${{ secrets.ENGINE_APP_PRIVATE_KEY }}
-          owner: ${{ env.TFPR_ENGINE_OWNER }}
-
-      - name: Checkout engine
-        if: inputs.engine_ref != ''
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: ${{ env.TFPR_ENGINE_REPO }}
-          ref: ${{ inputs.engine_ref }}
-          path: .tfpr-engine
-          token: ${{ steps.engine_token.outputs.token }}
-
-      # Skew guard: log the requested engine_ref and the SHA actually checked out.
-      - name: Log engine ref
-        if: inputs.engine_ref != ''
-        run: |
-          echo "engine_ref=${{ inputs.engine_ref }}"
-          echo "engine_sha=$(git -C "$GITHUB_WORKSPACE/.tfpr-engine" rev-parse HEAD)"
-
-      # Everything GitHub-facing in this job runs as the tfpr binary: the
-      # pinned release's prebuilt asset, or a build from the pinned source
-      # when no asset fits, so engine_ref keeps meaning source pin. In place
-      # before the event parse, so authorization and the acknowledge
-      # reaction run compiled too.
-      - name: Install tfpr
-        id: tfpr
-        env:
-          GH_TOKEN: ${{ steps.engine_token.outputs.token }}
-          TFPR_ENGINE_REF: ${{ inputs.engine_ref }}
-        run: bash "${TFPR_ENGINE_DIR:-$GITHUB_WORKSPACE}/scripts/install-tfpr.sh"
+          curl -sSfL --retry 3 -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github.raw" \
+            -o "$RUNNER_TEMP/install-runtime.sh" \
+            "${GITHUB_API_URL:-https://api.github.com}/repos/$TFPR_RUNTIME_REPO/contents/install-runtime.sh?ref=$TFPR_RUNTIME_SHA"
+          bash "$RUNNER_TEMP/install-runtime.sh"
 
       - name: Set up Go
-        if: steps.tfpr.outputs.installed != 'true'
+        if: job.workflow_repository == github.repository
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: ${{ env.TFPR_ENGINE_DIR }}/go.mod
-          cache-dependency-path: ${{ env.TFPR_ENGINE_DIR }}/go.sum
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
 
       - name: Build tfpr
-        if: steps.tfpr.outputs.installed != 'true'
+        if: job.workflow_repository == github.repository
         run: |
-          go build -C "$TFPR_ENGINE_DIR" -o "$RUNNER_TEMP/tfpr" ./cmd/tfpr
+          go build -o "$RUNNER_TEMP/tfpr" ./cmd/tfpr
           echo "TFPR_BIN=$RUNNER_TEMP/tfpr" >>"$GITHUB_ENV"
+          echo "TFPR_ENGINE_DIR=$GITHUB_WORKSPACE" >>"$GITHUB_ENV"
 
       - name: Parse event
         id: parse
@@ -372,14 +311,14 @@ jobs:
       # setup-tools' local action path cannot take an expression, so vendored and
       # reusable modes are two mutually exclusive steps (engine at ./ vs .tfpr-engine).
       - name: Setup tools (terragrunt discovery)
-        if: steps.auth.outputs.run == 'true' && steps.mode.outputs.tg == 'true' && inputs.engine_ref == ''
+        if: steps.auth.outputs.run == 'true' && steps.mode.outputs.tg == 'true' && job.workflow_repository == github.repository
         uses: ./.github/actions/setup-tools
         with:
           tools: terragrunt
           terragrunt_version: ${{ env.FALLBACK_TERRAGRUNT_VERSION }}
 
       - name: Setup tools (terragrunt discovery, reusable)
-        if: steps.auth.outputs.run == 'true' && steps.mode.outputs.tg == 'true' && inputs.engine_ref != ''
+        if: steps.auth.outputs.run == 'true' && steps.mode.outputs.tg == 'true' && job.workflow_repository != github.repository
         uses: ./.tfpr-engine/.github/actions/setup-tools
         with:
           tools: terragrunt
@@ -473,6 +412,52 @@ jobs:
             '❓ No project matches `%s`. The selector must equal a project label, name, or dir from `projects.yml` (labels are `<dir>/<name>`, or the unit path in terragrunt mode). Comment the command without `-p` to run every impacted project, or `/help` for the command list.' \
             "$FILTER")" >/dev/null
 
+      # The license state (#350). Every job checks and reports it; only an
+      # /apply is refused, here with one reply, and the apply job checks
+      # again. The newest revocation list is kept in the actions cache, so a
+      # failed download falls back to the last good copy. The tenant comes
+      # from the AZURE_TENANT_ID variable, never from a secret.
+      - name: Restore the revocation list
+        if: steps.auth.outputs.run == 'true'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/tfpr-license
+          key: tfpr-license-${{ github.run_id }}
+          restore-keys: tfpr-license-
+
+      - name: License check
+        id: license
+        if: steps.auth.outputs.run == 'true'
+        env:
+          TFPR_LICENSE: ${{ vars.TFPR_LICENSE }}
+          TFPR_ENTITLEMENT: ${{ vars.TFPR_ENTITLEMENT }}
+          ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          COMMAND: ${{ steps.parse.outputs.command }}
+          PR_NUMBER: ${{ steps.parse.outputs.pr_number }}
+          TFPR_LICENSE_HANDOVER: ${{ runner.temp }}/tfpr-license-handover/revocations.jws
+        run: '"$TFPR_BIN" license gate-apply'
+
+      # The list for the later jobs of this run (see tfpr license).
+      - name: Hand over the revocation list
+        if: steps.license.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tfpr-license
+          path: ${{ runner.temp }}/tfpr-license-handover/revocations.jws
+          retention-days: 1
+          overwrite: true
+
+      # A unique key per run: cache entries cannot be overwritten, and the
+      # restore above takes the newest entry under the prefix.
+      - name: Save the revocation list
+        if: steps.license.outputs.cache_updated == 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/tfpr-license
+          key: tfpr-license-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
+
       # Gate apply on the repo's required approvals (GitHub review decision). This
       # runs on every apply path, not just the comment one: apply_allowed requires
       # approved == 'true', so a path that skipped the gate would leave the output
@@ -481,7 +466,8 @@ jobs:
         id: approval
         if: >-
           steps.auth.outputs.run == 'true' &&
-          steps.parse.outputs.command == 'apply'
+          steps.parse.outputs.command == 'apply' &&
+          steps.license.outputs.apply_refused != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -530,6 +516,7 @@ jobs:
           COMMAND: ${{ steps.parse.outputs.command }}
           COUNT: ${{ steps.ctx.outputs.count }}
           APPROVED: ${{ steps.approval.outputs.approved }}
+          LICENSED: ${{ steps.license.outputs.apply_licensed }}
         run: '"$TFPR_BIN" apply-allowed'
 
       # Checks created with the workflow token land in an arbitrary Actions
@@ -581,14 +568,16 @@ jobs:
       # placeholder, and is completed by the gate job of whichever run owns
       # the results. The binary skips
       # filtered runs (a diagnostic must not reopen the gate); the conditions
-      # skip refused applies (nothing would complete it) and the unlock path.
+      # skip refused applies, by approval or license (nothing would complete
+      # it), and the unlock path.
       - name: Open merge gate
         id: gate_pending
         if: >-
           steps.auth.outputs.run == 'true' &&
           steps.parse.outputs.command != 'unlock' &&
           steps.pr.outputs.head_sha != '' &&
-          steps.approval.outputs.approved != 'false'
+          steps.approval.outputs.approved != 'false' &&
+          steps.license.outputs.apply_refused != 'true'
         env:
           GH_TOKEN: ${{ steps.checks_token.outputs.token || github.token }}
           GH_REPO: ${{ github.repository }}
@@ -612,7 +601,8 @@ jobs:
           steps.auth.outputs.run == 'true' &&
           steps.select.outputs.count != '0' &&
           steps.pr.outputs.head_sha != '' &&
-          steps.approval.outputs.approved != 'false'
+          steps.approval.outputs.approved != 'false' &&
+          steps.license.outputs.apply_refused != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -631,7 +621,8 @@ jobs:
           steps.auth.outputs.run == 'true' &&
           steps.select.outputs.count != '0' &&
           steps.pr.outputs.head_sha != '' &&
-          steps.approval.outputs.approved != 'false'
+          steps.approval.outputs.approved != 'false' &&
+          steps.license.outputs.apply_refused != 'true'
         env:
           GH_TOKEN: ${{ steps.checks_token.outputs.token || github.token }}
           GH_REPO: ${{ github.repository }}
@@ -656,11 +647,9 @@ jobs:
   #
   # Neither can fold into resolve. Resolve runs only for an author with standing
   # in the organization, and only for /plan, /apply and /unlock; widening it
-  # would mean a checkout and an engine app token for a drive-by outsider's
-  # comment. The gh calls are inlined rather than building tfpr for the same
-  # reason: in reusable mode the engine source is not in the consumer
-  # workspace, and fetching it would mean an app token for a job that only
-  # needs to post one comment.
+  # would mean a checkout and a runtime install for a drive-by outsider's
+  # comment. The gh calls are inlined rather than installing tfpr for the
+  # same reason: a job that only posts one comment needs neither.
   comment-reply:
     if: >-
       github.event_name == 'issue_comment' &&
@@ -760,7 +749,6 @@ jobs:
       cancel-in-progress: false
     uses: ./.github/workflows/plan.yml
     with:
-      engine_ref: ${{ inputs.engine_ref }}
       command: ${{ needs.resolve.outputs.command }}
       projects: ${{ needs.resolve.outputs.projects }}
       pr_number: ${{ needs.resolve.outputs.pr_number }}
@@ -772,12 +760,9 @@ jobs:
       trigger_event: ${{ github.event_name == 'issue_comment' && 'comment' || ((inputs.trigger_actor || github.event.inputs.trigger_actor) != '' && 'push' || 'manual') }}
       trigger_command: ${{ (github.event_name == 'issue_comment' || (inputs.trigger_actor || github.event.inputs.trigger_actor) == '') && format('/plan{0}', needs.resolve.outputs.project_filter != '' && format(' -p {0}', needs.resolve.outputs.project_filter) || '') || '' }}
       trigger_actor: ${{ inputs.trigger_actor || github.event.inputs.trigger_actor || github.actor }}
+      license_list_source: ${{ needs.resolve.outputs.license_list_source }}
     # Explicit, not inherit: this workflow runs for callers in any organization.
     secrets:
-      ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
-      ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
-      ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
-      ENGINE_APP_PRIVATE_KEY: ${{ secrets.ENGINE_APP_PRIVATE_KEY }}
       INFRACOST_API_KEY: ${{ secrets.INFRACOST_API_KEY }}
       TFPR_CHECKS_APP_PRIVATE_KEY: ${{ secrets.TFPR_CHECKS_APP_PRIVATE_KEY }}
 
@@ -812,12 +797,11 @@ jobs:
       group: tfpr-pr-${{ needs.resolve.outputs.pr_number }}
       cancel-in-progress: false
     env:
-      TFPR_ENGINE_DIR: ${{ inputs.engine_ref != '' && format('{0}/.tfpr-engine', github.workspace) || github.workspace }}
       ARM_USE_OIDC: "true"
       ARM_USE_AZUREAD: "true"
-      ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID || secrets.ARM_CLIENT_ID }}
-      ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID || secrets.ARM_TENANT_ID }}
-      ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID || secrets.ARM_SUBSCRIPTION_ID }}
+      ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
       AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
       AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
       BACKEND_AZURE_RESOURCE_GROUP_NAME: ${{ vars.BACKEND_AZURE_RESOURCE_GROUP_NAME }}
@@ -832,77 +816,46 @@ jobs:
           ref: ${{ needs.resolve.outputs.head_sha }}
           fetch-depth: 0
 
-      # Reusable mode needs a token that reads the private engine repository:
-      # the engine checkout below and the prebuilt tfpr download use it. Units
-      # never fetch private repositories (public AVM sources, vendored policy
-      # library), so nothing else authenticates git. Skipped when
-      # ENGINE_APP_CLIENT_ID is unset.
-      - name: Check engine credentials
-        if: vars.ENGINE_APP_CLIENT_ID != ''
+      # Reusable mode: install the runtime published with the release that
+      # holds this workflow file (job.workflow_ref), from the public
+      # entrypoint repo; no token, no private checkout. Vendored mode (the
+      # engine repository itself) builds tfpr from its own checkout.
+      - name: Install the engine runtime
+        if: job.workflow_repository != github.repository
         env:
-          ENGINE_APP_PRIVATE_KEY: ${{ secrets.ENGINE_APP_PRIVATE_KEY }}
+          GH_TOKEN: ${{ github.token }}
+          TFPR_RUNTIME_REPO: ${{ job.workflow_repository }}
+          TFPR_RUNTIME_REF: ${{ job.workflow_ref }}
+          TFPR_RUNTIME_SHA: ${{ job.workflow_sha }}
         run: |
-          if [[ -z "$ENGINE_APP_PRIVATE_KEY" ]]; then
-            echo "::error::ENGINE_APP_PRIVATE_KEY is empty in this run although ENGINE_APP_CLIENT_ID is set. Either the secret is missing on the repository, or the caller did not pass it: GitHub drops secrets: inherit when the caller is in another organization than nrit-solutions, so the ops and drift callers must pass ENGINE_APP_PRIVATE_KEY, TFPR_CHECKS_APP_PRIVATE_KEY and INFRACOST_API_KEY explicitly under secrets:, as the example callers do."
-            exit 1
-          fi
+          curl -sSfL --retry 3 -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github.raw" \
+            -o "$RUNNER_TEMP/install-runtime.sh" \
+            "${GITHUB_API_URL:-https://api.github.com}/repos/$TFPR_RUNTIME_REPO/contents/install-runtime.sh?ref=$TFPR_RUNTIME_SHA"
+          bash "$RUNNER_TEMP/install-runtime.sh"
 
-      - name: Engine app token
-        id: engine_token
-        if: vars.ENGINE_APP_CLIENT_ID != ''
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+      - name: Set up Go
+        if: job.workflow_repository == github.repository
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          client-id: ${{ vars.ENGINE_APP_CLIENT_ID }}
-          private-key: ${{ secrets.ENGINE_APP_PRIVATE_KEY }}
-          owner: ${{ env.TFPR_ENGINE_OWNER }}
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Build tfpr
+        if: job.workflow_repository == github.repository
+        run: |
+          go build -o "$RUNNER_TEMP/tfpr" ./cmd/tfpr
+          echo "TFPR_BIN=$RUNNER_TEMP/tfpr" >>"$GITHUB_ENV"
+          echo "TFPR_ENGINE_DIR=$GITHUB_WORKSPACE" >>"$GITHUB_ENV"
 
       - name: Azure login (OIDC)
         uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
         with:
-          client-id: ${{ vars.AZURE_CLIENT_ID || secrets.ARM_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID || secrets.ARM_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID || secrets.ARM_SUBSCRIPTION_ID }}
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      # Reusable mode: check out the engine at the pinned ref into .tfpr-engine
-      # (after the consumer checkout, so it is never wiped) with the engine
-      # app token.
-      - name: Checkout engine
-        if: inputs.engine_ref != ''
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: ${{ env.TFPR_ENGINE_REPO }}
-          ref: ${{ inputs.engine_ref }}
-          path: .tfpr-engine
-          token: ${{ steps.engine_token.outputs.token }}
-
-      # The renderer and the GitHub-facing scripts run as the tfpr binary:
-      # the pinned release's prebuilt asset, or a build from the pinned
-      # source when no asset fits, so engine_ref keeps meaning source pin.
-      # In place before verify-head so the verification itself uses the
-      # compiled port; the shell scripts stay in-tree and run when TFPR_BIN
-      # is unset.
-      - name: Install tfpr
-        id: tfpr
-        env:
-          GH_TOKEN: ${{ steps.engine_token.outputs.token }}
-          TFPR_ENGINE_REF: ${{ inputs.engine_ref }}
-        run: bash "${TFPR_ENGINE_DIR:-$GITHUB_WORKSPACE}/scripts/install-tfpr.sh"
-
-      - name: Set up Go
-        if: steps.tfpr.outputs.installed != 'true'
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: ${{ env.TFPR_ENGINE_DIR }}/go.mod
-          cache-dependency-path: ${{ env.TFPR_ENGINE_DIR }}/go.sum
-
-      - name: Build tfpr
-        if: steps.tfpr.outputs.installed != 'true'
-        run: |
-          go build -C "$TFPR_ENGINE_DIR" -o "$RUNNER_TEMP/tfpr" ./cmd/tfpr
-          echo "TFPR_BIN=$RUNNER_TEMP/tfpr" >>"$GITHUB_ENV"
-
-      # Runs after the engine checkout (the script lives there in reusable mode)
-      # and before any project code, so a head that moved stops the apply.
+      # Runs after the runtime install and before any project code,
+      # so a head that moved stops the apply.
       - name: Verify PR head is unchanged
         env:
           GH_TOKEN: ${{ github.token }}
@@ -924,13 +877,41 @@ jobs:
           APPROVAL_MODE: recheck
         run: '"$TFPR_BIN" check-approval'
 
+      # The license may have changed since resolve allowed this apply: a
+      # revocation takes effect on the next run. Download the list again and
+      # stop before any terraform runs when the state is plan only.
+      - name: Restore the revocation list
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/tfpr-license
+          key: tfpr-license-${{ github.run_id }}
+          restore-keys: tfpr-license-
+
+      - name: Re-check license
+        id: license
+        env:
+          TFPR_LICENSE: ${{ vars.TFPR_LICENSE }}
+          TFPR_ENTITLEMENT: ${{ vars.TFPR_ENTITLEMENT }}
+          ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ needs.resolve.outputs.pr_number }}
+        run: '"$TFPR_BIN" license recheck'
+
+      - name: Save the revocation list
+        if: steps.license.outputs.cache_updated == 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/tfpr-license
+          key: tfpr-license-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
+
       # setup-tools' local action path cannot take an expression, so vendored and
       # reusable modes are two mutually exclusive steps (engine at ./ vs .tfpr-engine).
       # extra_tools mirrors the plan job: the apply path re-plans and runs the
       # same post_plan hooks, so the hook tools must be installed here too, or
       # every gate reports its tool missing on the apply report.
       - name: Setup tools
-        if: inputs.engine_ref == ''
+        if: job.workflow_repository == github.repository
         uses: ./.github/actions/setup-tools
         with:
           tools: terraform terragrunt
@@ -939,7 +920,7 @@ jobs:
           extra_tools: ${{ vars.TFPR_EXTRA_TOOLS }}
 
       - name: Setup tools (reusable)
-        if: inputs.engine_ref != ''
+        if: job.workflow_repository != github.repository
         uses: ./.tfpr-engine/.github/actions/setup-tools
         with:
           tools: terraform terragrunt
@@ -1060,63 +1041,68 @@ jobs:
       id-token: write        # Azure OIDC login
       pull-requests: write   # confirm /unlock with a comment
     env:
-      TFPR_ENGINE_DIR: ${{ inputs.engine_ref != '' && format('{0}/.tfpr-engine', github.workspace) || github.workspace }}
       TFPR_LOCK_STORAGE_ACCOUNT: ${{ vars.TFPR_LOCK_STORAGE_ACCOUNT }}
       TFPR_LOCK_TABLE: ${{ vars.TFPR_LOCK_TABLE }}
       BACKEND_AZURE_STORAGE_ACCOUNT_NAME: ${{ vars.BACKEND_AZURE_STORAGE_ACCOUNT_NAME }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # Reusable mode: fetch the engine at the pinned ref (same app token
-      # pattern as the run/apply jobs; the installation reads the engine repo).
-      - name: Engine app token
-        id: engine_token
-        if: inputs.engine_ref != ''
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          client-id: ${{ vars.ENGINE_APP_CLIENT_ID }}
-          private-key: ${{ secrets.ENGINE_APP_PRIVATE_KEY }}
-          owner: ${{ env.TFPR_ENGINE_OWNER }}
-
-      - name: Checkout engine
-        if: inputs.engine_ref != ''
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: ${{ env.TFPR_ENGINE_REPO }}
-          ref: ${{ inputs.engine_ref }}
-          path: .tfpr-engine
-          token: ${{ steps.engine_token.outputs.token }}
-
-
-      # The unlock confirmation posts through the tfpr binary: prebuilt from
-      # the pinned release, or built from the pinned source, like every
-      # other job.
-      - name: Install tfpr
-        id: tfpr
+      # Reusable mode: install the runtime published with the release that
+      # holds this workflow file (job.workflow_ref), from the public
+      # entrypoint repo; no token, no private checkout. Vendored mode (the
+      # engine repository itself) builds tfpr from its own checkout.
+      - name: Install the engine runtime
+        if: job.workflow_repository != github.repository
         env:
-          GH_TOKEN: ${{ steps.engine_token.outputs.token }}
-          TFPR_ENGINE_REF: ${{ inputs.engine_ref }}
-        run: bash "${TFPR_ENGINE_DIR:-$GITHUB_WORKSPACE}/scripts/install-tfpr.sh"
+          GH_TOKEN: ${{ github.token }}
+          TFPR_RUNTIME_REPO: ${{ job.workflow_repository }}
+          TFPR_RUNTIME_REF: ${{ job.workflow_ref }}
+          TFPR_RUNTIME_SHA: ${{ job.workflow_sha }}
+        run: |
+          curl -sSfL --retry 3 -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github.raw" \
+            -o "$RUNNER_TEMP/install-runtime.sh" \
+            "${GITHUB_API_URL:-https://api.github.com}/repos/$TFPR_RUNTIME_REPO/contents/install-runtime.sh?ref=$TFPR_RUNTIME_SHA"
+          bash "$RUNNER_TEMP/install-runtime.sh"
 
       - name: Set up Go
-        if: steps.tfpr.outputs.installed != 'true'
+        if: job.workflow_repository == github.repository
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: ${{ env.TFPR_ENGINE_DIR }}/go.mod
-          cache-dependency-path: ${{ env.TFPR_ENGINE_DIR }}/go.sum
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
 
       - name: Build tfpr
-        if: steps.tfpr.outputs.installed != 'true'
+        if: job.workflow_repository == github.repository
         run: |
-          go build -C "$TFPR_ENGINE_DIR" -o "$RUNNER_TEMP/tfpr" ./cmd/tfpr
+          go build -o "$RUNNER_TEMP/tfpr" ./cmd/tfpr
           echo "TFPR_BIN=$RUNNER_TEMP/tfpr" >>"$GITHUB_ENV"
+          echo "TFPR_ENGINE_DIR=$GITHUB_WORKSPACE" >>"$GITHUB_ENV"
+
+      # Never fatal: without the file the check reports no list, and the
+      # gate and the drift report must still complete.
+      - name: Receive the revocation list
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: tfpr-license
+          path: ${{ runner.temp }}/tfpr-license-handover
+
+      # Verify and report the license with the list resolve loaded (#350).
+      - name: License check
+        env:
+          TFPR_LICENSE: ${{ vars.TFPR_LICENSE }}
+          TFPR_ENTITLEMENT: ${{ vars.TFPR_ENTITLEMENT }}
+          ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          TFPR_LICENSE_LIST_FILE: ${{ runner.temp }}/tfpr-license-handover/revocations.jws
+          TFPR_LICENSE_LIST_SOURCE: ${{ needs.resolve.outputs.license_list_source || 'none' }}
+        run: '"$TFPR_BIN" license check'
 
       - name: Azure login (OIDC)
         uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
         with:
-          client-id: ${{ vars.AZURE_CLIENT_ID || secrets.ARM_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID || secrets.ARM_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID || secrets.ARM_SUBSCRIPTION_ID }}
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
       - name: Release unit locks
         id: locks
@@ -1150,67 +1136,60 @@ jobs:
     runs-on: ubuntu-latest
     # The checks App key, as in resolve.
     environment: ${{ vars.TFPR_PLAN_ENVIRONMENT || 'plan' }}
-    env:
-      TFPR_ENGINE_DIR: ${{ inputs.engine_ref != '' && format('{0}/.tfpr-engine', github.workspace) || github.workspace }}
     steps:
-      # No checkouts: the gate reads its inputs from the artifacts below and
-      # runs as the prebuilt tfpr binary, fetched with the pinned ref's own
-      # installer through the contents API. The source build stays the
-      # fallback for a ref without an asset (a preview publish, a SHA,
-      # vendored mode), and only that path checks anything out.
-      - name: Engine app token
-        id: engine_token
-        if: inputs.engine_ref != ''
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          client-id: ${{ vars.ENGINE_APP_CLIENT_ID }}
-          private-key: ${{ secrets.ENGINE_APP_PRIVATE_KEY }}
-          owner: ${{ env.TFPR_ENGINE_OWNER }}
-
-      # A fetch failure is not an error: the fallback below builds instead,
-      # because this job must always get to complete its check.
-      - name: Install tfpr
-        id: tfpr
-        if: inputs.engine_ref != ''
+      # Reusable mode: install the runtime published with the release that
+      # holds this workflow file (job.workflow_ref), from the public
+      # entrypoint repo; no token, no private checkout. Vendored mode (the
+      # engine repository itself) builds tfpr from its own checkout.
+      - name: Install the engine runtime
+        if: job.workflow_repository != github.repository
         env:
-          GH_TOKEN: ${{ steps.engine_token.outputs.token }}
-          TFPR_ENGINE_REF: ${{ inputs.engine_ref }}
+          GH_TOKEN: ${{ github.token }}
+          TFPR_RUNTIME_REPO: ${{ job.workflow_repository }}
+          TFPR_RUNTIME_REF: ${{ job.workflow_ref }}
+          TFPR_RUNTIME_SHA: ${{ job.workflow_sha }}
         run: |
-          if ! curl -sSfL --retry 3 -H "Authorization: Bearer $GH_TOKEN" \
-              -H "Accept: application/vnd.github.raw" \
-              -o "$RUNNER_TEMP/install-tfpr.sh" \
-              "${GITHUB_API_URL:-https://api.github.com}/repos/$TFPR_ENGINE_REPO/contents/scripts/install-tfpr.sh?ref=$TFPR_ENGINE_REF"; then
-            echo "cannot fetch the installer for $TFPR_ENGINE_REF; building tfpr from source"
-            echo "installed=false" >>"$GITHUB_OUTPUT"
-            exit 0
-          fi
-          bash "$RUNNER_TEMP/install-tfpr.sh"
-
-      - name: Checkout engine (source fallback)
-        if: inputs.engine_ref != '' && steps.tfpr.outputs.installed != 'true'
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: ${{ env.TFPR_ENGINE_REPO }}
-          ref: ${{ inputs.engine_ref }}
-          path: .tfpr-engine
-          token: ${{ steps.engine_token.outputs.token }}
+          curl -sSfL --retry 3 -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github.raw" \
+            -o "$RUNNER_TEMP/install-runtime.sh" \
+            "${GITHUB_API_URL:-https://api.github.com}/repos/$TFPR_RUNTIME_REPO/contents/install-runtime.sh?ref=$TFPR_RUNTIME_SHA"
+          bash "$RUNNER_TEMP/install-runtime.sh"
 
       - name: Checkout (vendored mode)
-        if: inputs.engine_ref == ''
+        if: job.workflow_repository == github.repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Go
-        if: steps.tfpr.outputs.installed != 'true'
+        if: job.workflow_repository == github.repository
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: ${{ env.TFPR_ENGINE_DIR }}/go.mod
-          cache-dependency-path: ${{ env.TFPR_ENGINE_DIR }}/go.sum
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
 
       - name: Build tfpr
-        if: steps.tfpr.outputs.installed != 'true'
+        if: job.workflow_repository == github.repository
         run: |
-          go build -C "$TFPR_ENGINE_DIR" -o "$RUNNER_TEMP/tfpr" ./cmd/tfpr
+          go build -o "$RUNNER_TEMP/tfpr" ./cmd/tfpr
           echo "TFPR_BIN=$RUNNER_TEMP/tfpr" >>"$GITHUB_ENV"
+          echo "TFPR_ENGINE_DIR=$GITHUB_WORKSPACE" >>"$GITHUB_ENV"
+
+      # Never fatal: without the file the check reports no list, and the
+      # gate and the drift report must still complete.
+      - name: Receive the revocation list
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: tfpr-license
+          path: ${{ runner.temp }}/tfpr-license-handover
+
+      # Verify and report the license with the list resolve loaded (#350).
+      - name: License check
+        env:
+          TFPR_LICENSE: ${{ vars.TFPR_LICENSE }}
+          TFPR_ENTITLEMENT: ${{ vars.TFPR_ENTITLEMENT }}
+          ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          TFPR_LICENSE_LIST_FILE: ${{ runner.temp }}/tfpr-license-handover/revocations.jws
+          TFPR_LICENSE_LIST_SOURCE: ${{ needs.resolve.outputs.license_list_source || 'none' }}
+        run: '"$TFPR_BIN" license check'
 
       # Only the app that created a check may complete it, so completing the
       # merge gate and sweeping the leftovers must present the same identity
