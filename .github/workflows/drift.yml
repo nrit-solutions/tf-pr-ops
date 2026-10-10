@@ -48,8 +48,8 @@ env:
   CONFIG_FILE: projects.yml
   # Used only when the repo has no version manager (mise/asdf). When it does,
   # those pinned versions win (see .github/actions/setup-tools).
-  FALLBACK_TERRAFORM_VERSION: "1.9.8"
-  FALLBACK_TERRAGRUNT_VERSION: "1.1.2"
+  FALLBACK_TERRAFORM_VERSION: "1.16.5"
+  FALLBACK_TERRAGRUNT_VERSION: "1.1.6"
 
 jobs:
   resolve:

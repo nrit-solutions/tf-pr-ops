@@ -63,8 +63,8 @@ env:
   # Used only when the repo has no version manager (mise/asdf). Duplicated from
   # terraform-pr-ops.yml, which still needs them for the apply job;
   # scripts/check-fallback-versions.sh fails CI if the two drift apart.
-  FALLBACK_TERRAFORM_VERSION: "1.9.8"
-  FALLBACK_TERRAGRUNT_VERSION: "1.1.2"
+  FALLBACK_TERRAFORM_VERSION: "1.16.5"
+  FALLBACK_TERRAGRUNT_VERSION: "1.1.6"
 
 jobs:
   project:
