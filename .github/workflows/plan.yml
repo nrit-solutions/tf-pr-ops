@@ -112,6 +112,20 @@ jobs:
       BACKEND_AZURE_STORAGE_ACCOUNT_NAME: ${{ vars.BACKEND_AZURE_STORAGE_ACCOUNT_NAME }}
       BACKEND_AZURE_STORAGE_ACCOUNT_CONTAINER_NAME: ${{ vars.BACKEND_AZURE_STORAGE_ACCOUNT_CONTAINER_NAME }}
     steps:
+      # Only the app that created a check may update it, so when the
+      # dedicated checks App is configured the link and the completion
+      # present its token (see the matching step in the parent's resolve job).
+      # First, so a failure in any later step still completes the row (#260).
+      - name: Checks app token
+        id: checks_token
+        if: vars.TFPR_CHECKS_APP_CLIENT_ID != ''
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.TFPR_CHECKS_APP_CLIENT_ID }}
+          private-key: ${{ secrets.TFPR_CHECKS_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+
       # Check out the exact commit resolve pinned, not the moving PR head ref, so
       # the code that runs is the code that was selected and gated.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -203,19 +217,6 @@ jobs:
           key: tfpr-providers-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/.terraform.lock.hcl') }}
           restore-keys: |
             tfpr-providers-${{ runner.os }}-${{ runner.arch }}-
-
-      # Only the app that created a check may update it, so when the
-      # dedicated checks App is configured the link and the completion
-      # present its token (see the matching step in the parent's resolve job).
-      - name: Checks app token
-        id: checks_token
-        if: vars.TFPR_CHECKS_APP_CLIENT_ID != ''
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          client-id: ${{ vars.TFPR_CHECKS_APP_CLIENT_ID }}
-          private-key: ${{ secrets.TFPR_CHECKS_APP_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-          repositories: ${{ github.event.repository.name }}
 
       # Point this project's pre-created check at this job, so its "View
       # more details" opens the live log rather than the run overview. Same
