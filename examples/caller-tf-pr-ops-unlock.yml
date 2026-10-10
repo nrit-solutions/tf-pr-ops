@@ -21,4 +21,4 @@ jobs:
     if: github.event.repository.is_template != true
     runs-on: ubuntu-latest
     steps:
-      - uses: nrit-solutions/tf-pr-ops/.github/actions/dispatch@v9.1.0 # x-release-please-version
+      - uses: nrit-solutions/tf-pr-ops/.github/actions/dispatch@v9.1.1 # x-release-please-version
