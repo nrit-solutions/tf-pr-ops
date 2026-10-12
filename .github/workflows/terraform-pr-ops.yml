@@ -276,6 +276,139 @@ jobs:
           path: ${{ runner.temp }}/tfpr-discovery/inventory.json
           retention-days: 1
 
+  # The floor in resolve needs the base tree's reading map: which unit reads
+  # which file, as the base tree's own terragrunt find reports it (#409).
+  # That evaluates default-branch HCL, so it runs in its own job that never
+  # touches PR code and holds nothing: no environment, no App token, no
+  # id-token. It cannot share the discover job: PR code there could leave a
+  # background process that rewrites the map before the upload. resolve
+  # downloads this artifact by id, so nothing uploaded under its name from
+  # elsewhere in the run can stand in for it.
+  floor:
+    if: >-
+      github.event.repository.is_template != true &&
+      (github.event_name != 'issue_comment' ||
+       (github.event.issue.pull_request != null &&
+        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association) &&
+        (startsWith(github.event.comment.body, '/plan') ||
+         startsWith(github.event.comment.body, '/apply'))))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read   # the PR's base branch name
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install the engine runtime
+        if: job.workflow_repository != github.repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TFPR_RUNTIME_REPO: ${{ job.workflow_repository }}
+          TFPR_RUNTIME_REF: ${{ job.workflow_ref }}
+          TFPR_RUNTIME_SHA: ${{ job.workflow_sha }}
+        run: |
+          curl -sSfL --retry 3 -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github.raw" \
+            -o "$RUNNER_TEMP/install-runtime.sh" \
+            "${GITHUB_API_URL:-https://api.github.com}/repos/$TFPR_RUNTIME_REPO/contents/install-runtime.sh?ref=$TFPR_RUNTIME_SHA"
+          bash "$RUNNER_TEMP/install-runtime.sh"
+
+      - name: Set up Go
+        if: job.workflow_repository == github.repository
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Build tfpr
+        if: job.workflow_repository == github.repository
+        run: |
+          go build -o "$RUNNER_TEMP/tfpr" ./cmd/tfpr
+          echo "TFPR_BIN=$RUNNER_TEMP/tfpr" >>"$GITHUB_ENV"
+          echo "TFPR_ENGINE_DIR=$GITHUB_WORKSPACE" >>"$GITHUB_ENV"
+
+      - name: Parse event
+        id: parse
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_ACTION: ${{ github.event.action }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          COMMENT_IS_PR: ${{ github.event.issue.pull_request != null }}
+          COMMENT_PR: ${{ github.event.issue.number }}
+          DISPATCH_COMMAND: ${{ inputs.command || github.event.inputs.command }}
+          DISPATCH_PROJECT: ${{ inputs.project || github.event.inputs.project }}
+          DISPATCH_PR: ${{ inputs.pr_number || github.event.inputs.pr_number }}
+        run: '"$TFPR_BIN" parse-event'
+
+      # The base branch, never the PR head: nothing from the PR is checked
+      # out in this job. The token is in this step's environment only.
+      - name: Fetch the base tree
+        id: base
+        if: >-
+          steps.parse.outputs.run == 'true' &&
+          steps.parse.outputs.command != 'unlock'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.parse.outputs.pr_number }}
+        run: |
+          base="$(gh pr view "$PR_NUMBER" --json baseRefName --jq .baseRefName)"
+          echo "base_ref=$base" >>"$GITHUB_OUTPUT"
+          git worktree add --detach --quiet "$RUNNER_TEMP/base-tree" "origin/$base"
+
+      - name: Install terragrunt
+        if: steps.base.outcome == 'success'
+        working-directory: ${{ runner.temp }}/base-tree
+        env:
+          TERRAGRUNT_VERSION: ${{ env.FALLBACK_TERRAGRUNT_VERSION }}
+        run: |
+          set -euo pipefail
+          [ "$("$TFPR_BIN" discover --print-mode)" = terragrunt ] || exit 0
+          case "$(uname -m)" in
+            x86_64|amd64) arch=amd64 ;;
+            aarch64|arm64) arch=arm64 ;;
+            *) echo "no terragrunt build for $(uname -m)" >&2; exit 1 ;;
+          esac
+          binary="terragrunt_linux_${arch}"
+          dir="$RUNNER_TEMP/tfpr-tools"
+          mkdir -p "$dir/dl"
+          base="https://github.com/gruntwork-io/terragrunt/releases/download/v${TERRAGRUNT_VERSION}"
+          curl -sSfL --retry 3 -o "$dir/dl/$binary" "$base/$binary"
+          curl -sSfL --retry 3 -o "$dir/dl/SHA256SUMS" "$base/SHA256SUMS"
+          (cd "$dir/dl" && grep " ${binary}\$" SHA256SUMS | sha256sum -c -)
+          install -m 0755 "$dir/dl/$binary" "$dir/terragrunt"
+          echo "$dir" >>"$GITHUB_PATH"
+          "$dir/terragrunt" --version | head -1
+
+      # Plain terraform mode has no reading map; an empty one keeps the
+      # unattributed-path rule as it is.
+      - name: Map the base tree's shared files
+        if: steps.base.outcome == 'success'
+        working-directory: ${{ runner.temp }}/base-tree
+        env:
+          CONFIG_FILE: ${{ env.CONFIG_FILE }}
+          TFPR_READING_FILE: ${{ runner.temp }}/tfpr-floor/base-reading.json
+        run: |
+          mkdir -p "$(dirname "$TFPR_READING_FILE")"
+          if [ "$("$TFPR_BIN" discover --print-mode)" = terragrunt ]; then
+            "$TFPR_BIN" discover >/dev/null
+          else
+            echo '{}' >"$TFPR_READING_FILE"
+          fi
+
+      - name: Upload the reading map
+        id: upload
+        if: steps.base.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tfpr-floor
+          path: ${{ runner.temp }}/tfpr-floor/base-reading.json
+          retention-days: 1
+
   resolve:
     # Two early exits, both cheap.
     #
@@ -298,9 +431,9 @@ jobs:
     # below. The commands that change something are then re-checked against the
     # commenter's real repository permission by the Authorize command step; an
     # expression cannot call the API, so that part cannot live here.
-    needs: discover
-    # Runs when discover failed too, so a refusal or a discovery error is
-    # still answered on the PR.
+    needs: [discover, floor]
+    # Runs when discover or floor failed too, so a refusal or a discovery
+    # error is still answered on the PR.
     if: >-
       !cancelled() &&
       github.event.repository.is_template != true &&
@@ -494,6 +627,20 @@ jobs:
           name: tfpr-discovery
           path: ${{ runner.temp }}/tfpr-discovery
 
+      # The base tree's reading map, by artifact id from the floor job. A
+      # missing map attributes no shared file, so a changed one fails the
+      # gate as unattributed rather than passing unchecked.
+      - name: Receive the base reading map
+        if: >-
+          steps.auth.outputs.run == 'true' &&
+          steps.parse.outputs.command != 'unlock' &&
+          needs.floor.outputs.artifact_id != ''
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.floor.outputs.artifact_id }}
+          path: ${{ runner.temp }}/tfpr-floor
+
       - name: Check discovery against the changed files
         id: discovery
         if: >-
@@ -501,6 +648,7 @@ jobs:
           steps.parse.outputs.command != 'unlock'
         env:
           TFPR_INVENTORY_FILE: ${{ runner.temp }}/tfpr-discovery/inventory.json
+          TFPR_BASE_READING_FILE: ${{ runner.temp }}/tfpr-floor/base-reading.json
           HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
           BASE_REF: ${{ steps.pr.outputs.base_ref }}
           CHANGED_FILES: ${{ steps.changed.outputs.files }}
