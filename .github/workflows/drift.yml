@@ -387,15 +387,17 @@ jobs:
           PROJECT_DIR: ${{ matrix.project.dir }}
           PROJECT_LABEL: ${{ matrix.project.label }}
           PROJECT_TOOL: ${{ matrix.project.tool }}
-          REPORT_FILE: ${{ github.workspace }}/.tfpr/${{ matrix.project.label }}.md
-          CHECK_TEXT_FILE: ${{ github.workspace }}/.tfpr/${{ matrix.project.label }}.check.md
+          REPORT_FILE: ${{ runner.temp }}/tfpr-out/${{ matrix.project.label }}.md
+          CHECK_TEXT_FILE: ${{ runner.temp }}/tfpr-out/${{ matrix.project.label }}.check.md
           TFPR_TRIGGER_EVENT: ${{ github.event_name == 'schedule' && 'schedule' || 'manual' }}
           TFPR_TRIGGER_ACTOR: ${{ github.event_name != 'schedule' && github.actor || '' }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           STEPS_JSON: ${{ toJson(matrix.project.steps) }}
+          EXTRA_ENV_JSON: ${{ toJson(matrix.project.extra_env) }}
           INFRACOST_API_KEY: ${{ secrets.INFRACOST_API_KEY }}
           INIT_ARGS: ${{ vars.TFPR_INIT_ARGS }}
-        run: TF_PLUGIN_CACHE_DIR="$HOME/.terraform.d/plugin-cache" "$TFPR_BIN" run-project
+        # exec: no shell is left holding the tokens for PR code to read (#395).
+        run: TF_PLUGIN_CACHE_DIR="$HOME/.terraform.d/plugin-cache" exec "$TFPR_BIN" run-project
 
       # Stage this unit's result (status + report) for the report job. The report
       # job runs on a hosted runner and never touches state, so only the outcome
@@ -406,8 +408,8 @@ jobs:
           LABEL: ${{ matrix.project.label }}
           STATUS: ${{ steps.tf.outputs.status }}
           SUMMARY: ${{ steps.tf.outputs.summary }}
-          REPORT_FILE: ${{ github.workspace }}/.tfpr/${{ matrix.project.label }}.md
-          CHECK_TEXT_FILE: ${{ github.workspace }}/.tfpr/${{ matrix.project.label }}.check.md
+          REPORT_FILE: ${{ runner.temp }}/tfpr-out/${{ matrix.project.label }}.md
+          CHECK_TEXT_FILE: ${{ runner.temp }}/tfpr-out/${{ matrix.project.label }}.check.md
         run: |
           set -euo pipefail
           mkdir -p drift

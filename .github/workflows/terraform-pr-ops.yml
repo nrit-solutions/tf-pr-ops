@@ -89,6 +89,193 @@ env:
   FALLBACK_TERRAGRUNT_VERSION: "1.1.6"
 
 jobs:
+  # Discovery runs PR code: terragrunt evaluates the PR's HCL, run_cmd()
+  # included. So it runs here, apart from everything that holds a credential:
+  # no environment, no App token, no id-token, a read-only workflow token
+  # that only two steps see, and the PR head in a worktree under RUNNER_TEMP,
+  # never the workspace. resolve treats what it uploads as data (#394).
+  discover:
+    if: >-
+      github.event.repository.is_template != true &&
+      (github.event_name != 'issue_comment' ||
+       (github.event.issue.pull_request != null &&
+        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association) &&
+        (startsWith(github.event.comment.body, '/plan') ||
+         startsWith(github.event.comment.body, '/apply') ||
+         startsWith(github.event.comment.body, '/unlock'))))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read   # the PR's head and base, before any PR code runs
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install the engine runtime
+        if: job.workflow_repository != github.repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TFPR_RUNTIME_REPO: ${{ job.workflow_repository }}
+          TFPR_RUNTIME_REF: ${{ job.workflow_ref }}
+          TFPR_RUNTIME_SHA: ${{ job.workflow_sha }}
+        run: |
+          curl -sSfL --retry 3 -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github.raw" \
+            -o "$RUNNER_TEMP/install-runtime.sh" \
+            "${GITHUB_API_URL:-https://api.github.com}/repos/$TFPR_RUNTIME_REPO/contents/install-runtime.sh?ref=$TFPR_RUNTIME_SHA"
+          bash "$RUNNER_TEMP/install-runtime.sh"
+
+      - name: Set up Go
+        if: job.workflow_repository == github.repository
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Build tfpr
+        if: job.workflow_repository == github.repository
+        run: |
+          go build -o "$RUNNER_TEMP/tfpr" ./cmd/tfpr
+          echo "TFPR_BIN=$RUNNER_TEMP/tfpr" >>"$GITHUB_ENV"
+          echo "TFPR_ENGINE_DIR=$GITHUB_WORKSPACE" >>"$GITHUB_ENV"
+
+      - name: Parse event
+        id: parse
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_ACTION: ${{ github.event.action }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          COMMENT_IS_PR: ${{ github.event.issue.pull_request != null }}
+          COMMENT_PR: ${{ github.event.issue.number }}
+          DISPATCH_COMMAND: ${{ inputs.command || github.event.inputs.command }}
+          DISPATCH_PROJECT: ${{ inputs.project || github.event.inputs.project }}
+          DISPATCH_PR: ${{ inputs.pr_number || github.event.inputs.pr_number }}
+        run: '"$TFPR_BIN" parse-event'
+
+      # The token is in this step's environment only, and nothing from the PR
+      # has run yet.
+      - name: Fetch the PR head and base
+        id: pr
+        if: >-
+          steps.parse.outputs.run == 'true' &&
+          steps.parse.outputs.command != 'unlock'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.parse.outputs.pr_number }}
+          CONFIG_FILE: ${{ env.CONFIG_FILE }}
+        run: |
+          read -r base sha cross < <(gh pr view "$PR_NUMBER" \
+            --json baseRefName,headRefOid,isCrossRepository \
+            --jq '"\(.baseRefName) \(.headRefOid) \(.isCrossRepository)"')
+          if [ "$cross" = "true" ]; then
+            echo "fork pull requests are not supported" >&2
+            exit 1
+          fi
+          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="http.${GITHUB_SERVER_URL}/.extraheader"
+          GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          export GIT_CONFIG_VALUE_0
+          echo "base_ref=$base" >>"$GITHUB_OUTPUT"
+          echo "head_sha=$sha" >>"$GITHUB_OUTPUT"
+          BASE_REF="$base" HEAD_SHA="$sha" "$TFPR_BIN" changed-files
+          git worktree add --detach --quiet "$RUNNER_TEMP/pr-tree" "$sha"
+
+      # Pinned and checksum-verified, never the PR's version manager or a
+      # local action: nothing from the PR tree decides what is installed.
+      - name: Install terragrunt
+        if: steps.pr.outcome == 'success'
+        working-directory: ${{ runner.temp }}/pr-tree
+        env:
+          TERRAGRUNT_VERSION: ${{ env.FALLBACK_TERRAGRUNT_VERSION }}
+        run: |
+          set -euo pipefail
+          [ "$("$TFPR_BIN" discover --print-mode)" = terragrunt ] || exit 0
+          case "$(uname -m)" in
+            x86_64|amd64) arch=amd64 ;;
+            aarch64|arm64) arch=arm64 ;;
+            *) echo "no terragrunt build for $(uname -m)" >&2; exit 1 ;;
+          esac
+          binary="terragrunt_linux_${arch}"
+          dir="$RUNNER_TEMP/tfpr-tools"
+          mkdir -p "$dir/dl"
+          base="https://github.com/gruntwork-io/terragrunt/releases/download/v${TERRAGRUNT_VERSION}"
+          curl -sSfL --retry 3 -o "$dir/dl/$binary" "$base/$binary"
+          curl -sSfL --retry 3 -o "$dir/dl/SHA256SUMS" "$base/SHA256SUMS"
+          (cd "$dir/dl" && grep " ${binary}\$" SHA256SUMS | sha256sum -c -)
+          install -m 0755 "$dir/dl/$binary" "$dir/terragrunt"
+          echo "$dir" >>"$GITHUB_PATH"
+          "$dir/terragrunt" --version | head -1
+
+      - name: Select projects
+        id: select
+        if: steps.pr.outcome == 'success'
+        working-directory: ${{ runner.temp }}/pr-tree
+        env:
+          CONFIG_FILE: ${{ env.CONFIG_FILE }}
+          PROJECT_FILTER: ${{ steps.parse.outputs.project_filter }}
+          CHANGED_FILES: ${{ steps.pr.outputs.files }}
+          COMMAND: ${{ steps.parse.outputs.command }}
+          TFPR_UNITS_FILE: ${{ runner.temp }}/tfpr-head-units.json
+        run: '"$TFPR_BIN" discover'
+
+      # A filtered run's gate judges every unit the PR impacts, not just the one
+      # the selector named (#360), so discover that set too, without the filter.
+      - name: Select the full impacted set
+        id: full_select
+        if: steps.pr.outcome == 'success' && steps.parse.outputs.project_filter != ''
+        working-directory: ${{ runner.temp }}/pr-tree
+        env:
+          CONFIG_FILE: ${{ env.CONFIG_FILE }}
+          CHANGED_FILES: ${{ steps.pr.outputs.files }}
+          COMMAND: ${{ steps.parse.outputs.command }}
+        run: '"$TFPR_BIN" discover'
+
+      # Discovery walks the PR tree, so a unit directory deleted on this branch is
+      # discovered by nothing: never selected, never planned, never destroyed, and
+      # with an empty selection the merge gate used to call the PR "No Terraform
+      # changes". Discover the base tree too and diff the two inventories. resolve
+      # verifies the answer against git ls-tree and writes the PR report.
+      - name: Detect removed units
+        id: removed
+        if: steps.pr.outcome == 'success'
+        working-directory: ${{ runner.temp }}/pr-tree
+        env:
+          CONFIG_FILE: ${{ env.CONFIG_FILE }}
+          BASE_REF: ${{ steps.pr.outputs.base_ref }}
+          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+          CHANGED_FILES: ${{ steps.pr.outputs.files }}
+          HEAD_UNITS_FILE: ${{ runner.temp }}/tfpr-head-units.json
+        run: '"$TFPR_BIN" detect-removed-units'
+
+      - name: Write the inventory
+        if: steps.pr.outcome == 'success'
+        env:
+          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+          PROJECTS: ${{ steps.select.outputs.projects }}
+          COUNT: ${{ steps.select.outputs.count }}
+          UNATTRIBUTED: ${{ steps.select.outputs.unattributed }}
+          FULL_PROJECTS: ${{ steps.full_select.outputs.projects }}
+          FULL_UNATTRIBUTED: ${{ steps.full_select.outputs.unattributed }}
+          REMOVED_UNITS: ${{ steps.removed.outputs.removed_units }}
+          REMOVED_CHECK: ${{ steps.removed.outputs.removed_check }}
+          REMOVED_EXPLAINS_TF: ${{ steps.removed.outputs.removed_explains_tf }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/tfpr-discovery"
+          jq -n '{head_sha: env.HEAD_SHA, projects: env.PROJECTS, count: env.COUNT,
+            unattributed: env.UNATTRIBUTED, full_projects: env.FULL_PROJECTS,
+            full_unattributed: env.FULL_UNATTRIBUTED, removed_units: env.REMOVED_UNITS,
+            removed_check: env.REMOVED_CHECK, removed_explains_tf: env.REMOVED_EXPLAINS_TF}' \
+            >"$RUNNER_TEMP/tfpr-discovery/inventory.json"
+
+      - name: Upload the inventory
+        if: steps.pr.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tfpr-discovery
+          path: ${{ runner.temp }}/tfpr-discovery/inventory.json
+          retention-days: 1
+
   resolve:
     # Two early exits, both cheap.
     #
@@ -111,7 +298,11 @@ jobs:
     # below. The commands that change something are then re-checked against the
     # commenter's real repository permission by the Authorize command step; an
     # expression cannot call the API, so that part cannot live here.
+    needs: discover
+    # Runs when discover failed too, so a refusal or a discovery error is
+    # still answered on the PR.
     if: >-
+      !cancelled() &&
       github.event.repository.is_template != true &&
       (github.event_name != 'issue_comment' ||
        (github.event.issue.pull_request != null &&
@@ -119,8 +310,9 @@ jobs:
         (startsWith(github.event.comment.body, '/plan') ||
          startsWith(github.event.comment.body, '/apply') ||
          startsWith(github.event.comment.body, '/unlock'))))
-    # Discovery and gh calls only; no Azure. Runs on a hosted runner so it never
-    # waits on the (constrained, network-scoped) self-hosted runner that run/apply use.
+    # Checks the discovery inventory and makes gh calls; no Azure, no PR code.
+    # Runs on a hosted runner so it never waits on the (constrained,
+    # network-scoped) self-hosted runner that run/apply use.
     runs-on: ubuntu-latest
     # For the checks App key, which lives in the environments that only the
     # default branch can use; no id-token, so no Azure identity comes with it.
@@ -143,8 +335,8 @@ jobs:
       unattributed: ${{ steps.ctx.outputs.unattributed }}
       # A filtered run's unfiltered selection and its unattributed paths; empty
       # on a full run.
-      full_projects: ${{ steps.full_select.outputs.projects }}
-      full_unattributed: ${{ steps.full_select.outputs.unattributed }}
+      full_projects: ${{ steps.discovery.outputs.full_projects }}
+      full_unattributed: ${{ steps.discovery.outputs.full_unattributed }}
       # Units on the base branch that this branch deleted. Reported, not blocked;
       # removed_explains_tf tells the gate a zero selection was a removal, or a
       # config-only edit that left the unit inventory unchanged, and not a unit
@@ -152,6 +344,9 @@ jobs:
       removed_units: ${{ steps.ctx.outputs.removed_units }}
       removed_check: ${{ steps.ctx.outputs.removed_check }}
       removed_explains_tf: ${{ steps.ctx.outputs.removed_explains_tf }}
+      # Where the discovery inventory disagrees with the static floor; empty
+      # when it agrees. The gate fails on it and apply is refused (#394).
+      discovery_mismatch: ${{ steps.discovery.outputs.mismatch }}
       head_sha: ${{ steps.ctx.outputs.head_sha }}
       # The run identity stamped on the PR check runs, so completion and both
       # sweeps match what was created.
@@ -255,13 +450,20 @@ jobs:
           steps.parse.outputs.command != 'unlock'
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           PR_NUMBER: ${{ steps.parse.outputs.pr_number }}
+          COMMAND: ${{ steps.parse.outputs.command }}
         run: |
-          read -r head base sha cross < <(gh pr view "$PR_NUMBER" \
-            --json headRefName,baseRefName,headRefOid,isCrossRepository \
-            --jq '"\(.headRefName) \(.baseRefName) \(.headRefOid) \(.isCrossRepository)"')
+          read -r head base sha cross state < <(gh pr view "$PR_NUMBER" \
+            --json headRefName,baseRefName,headRefOid,isCrossRepository,state \
+            --jq '"\(.headRefName) \(.baseRefName) \(.headRefOid) \(.isCrossRepository) \(.state)"')
           if [ "$cross" = "true" ]; then
             echo "fork pull requests are not supported" >&2
+            exit 1
+          fi
+          # The review decision survives a close, so a closed PR must never plan or apply.
+          if [ "$state" != "OPEN" ]; then
+            PR_STATE="$state" "$TFPR_BIN" require-open-pr
             exit 1
           fi
           echo "head_ref=$head" >>"$GITHUB_OUTPUT"
@@ -279,110 +481,41 @@ jobs:
           CONFIG_FILE: ${{ env.CONFIG_FILE }}
         run: '"$TFPR_BIN" changed-files'
 
-      # The workspace holds the default branch, so a unit that exists only on the
-      # PR branch is invisible to terragrunt discovery. Check out the PR head into
-      # the working tree (as data to discover; the engine stays pinned in
-      # .tfpr-engine) so net-new units are seen. Resolve holds no id-token, so no
-      # Azure privilege is widened. A plain git checkout is used, not a second
-      # actions/checkout, whose git clean would wipe .tfpr-engine.
-      - name: Checkout PR head for discovery
+      # The discovery inventory: data the PR could have shaped, checked here
+      # against the static floor from the changed files before anything
+      # uses it, with the hooks taken from this default-branch checkout.
+      - name: Receive the discovery inventory
+        if: >-
+          steps.auth.outputs.run == 'true' &&
+          steps.parse.outputs.command != 'unlock'
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: tfpr-discovery
+          path: ${{ runner.temp }}/tfpr-discovery
+
+      - name: Check discovery against the changed files
+        id: discovery
         if: >-
           steps.auth.outputs.run == 'true' &&
           steps.parse.outputs.command != 'unlock'
         env:
-          PR_NUMBER: ${{ steps.parse.outputs.pr_number }}
+          TFPR_INVENTORY_FILE: ${{ runner.temp }}/tfpr-discovery/inventory.json
           HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
-        run: |
-          git fetch --quiet origin "refs/pull/${PR_NUMBER}/head"
-          git checkout --quiet --force "$HEAD_SHA"
-
-      # Terragrunt discovery needs terragrunt available in resolve. The mode
-      # comes from the same parse that drives discovery, so the two can never
-      # disagree; install only then (other modes are pure filesystem).
-      - name: Detect terragrunt mode
-        id: mode
-        if: >-
-          steps.auth.outputs.run == 'true' &&
-          steps.parse.outputs.command != 'unlock'
-        run: |
-          mode="$("$TFPR_BIN" discover --print-mode)"
-          if [ "$mode" = terragrunt ]; then echo "tg=true" >>"$GITHUB_OUTPUT"; else echo "tg=false" >>"$GITHUB_OUTPUT"; fi
-
-      # setup-tools' local action path cannot take an expression, so vendored and
-      # reusable modes are two mutually exclusive steps (engine at ./ vs .tfpr-engine).
-      - name: Setup tools (terragrunt discovery)
-        if: steps.auth.outputs.run == 'true' && steps.mode.outputs.tg == 'true' && job.workflow_repository == github.repository
-        uses: ./.github/actions/setup-tools
-        with:
-          tools: terragrunt
-          terragrunt_version: ${{ env.FALLBACK_TERRAGRUNT_VERSION }}
-
-      - name: Setup tools (terragrunt discovery, reusable)
-        if: steps.auth.outputs.run == 'true' && steps.mode.outputs.tg == 'true' && job.workflow_repository != github.repository
-        uses: ./.tfpr-engine/.github/actions/setup-tools
-        with:
-          tools: terragrunt
-          terragrunt_version: ${{ env.FALLBACK_TERRAGRUNT_VERSION }}
-
-      - name: Select projects
-        id: select
-        if: >-
-          steps.auth.outputs.run == 'true' &&
-          steps.parse.outputs.command != 'unlock'
-        env:
+          BASE_REF: ${{ steps.pr.outputs.base_ref }}
+          CHANGED_FILES: ${{ steps.changed.outputs.files }}
           CONFIG_FILE: ${{ env.CONFIG_FILE }}
           PROJECT_FILTER: ${{ steps.parse.outputs.project_filter }}
-          CHANGED_FILES: ${{ steps.changed.outputs.files }}
-          # A filtered apply selects exactly the named unit; discovery needs
-          # the command to know not to pull dependents in.
           COMMAND: ${{ steps.parse.outputs.command }}
-          # The removed-unit check reuses this inventory instead of
-          # re-discovering the PR tree.
-          TFPR_UNITS_FILE: ${{ runner.temp }}/tfpr-head-units.json
-        run: '"$TFPR_BIN" discover'
-
-      # A filtered run's gate judges every unit the PR impacts, not just the one
-      # the selector named (#360), so discover that set too, without the filter.
-      - name: Select the full impacted set
-        id: full_select
-        if: >-
-          steps.auth.outputs.run == 'true' &&
-          steps.parse.outputs.command != 'unlock' &&
-          steps.parse.outputs.project_filter != ''
-        env:
-          CONFIG_FILE: ${{ env.CONFIG_FILE }}
-          CHANGED_FILES: ${{ steps.changed.outputs.files }}
-          COMMAND: ${{ steps.parse.outputs.command }}
-        run: '"$TFPR_BIN" discover'
-
-      # Discovery walks the PR tree, so a unit directory deleted on this branch is
-      # discovered by nothing: never selected, never planned, never destroyed, and
-      # with an empty selection the merge gate used to call the PR "No Terraform
-      # changes". Discover the base tree too (git archive of origin/<base>, which
-      # the changed-files step already fetched) and diff the two inventories.
-      # It reports and does not block: the engine cannot destroy a unit it can no
-      # longer discover, so the manual procedure goes on the PR instead. Teaching
-      # it to destroy is nrit-solutions/nrit-alz-platform-internal-docs#7.
-      - name: Detect removed units
-        id: removed
-        if: >-
-          steps.auth.outputs.run == 'true' &&
-          steps.parse.outputs.command != 'unlock'
-        env:
-          CONFIG_FILE: ${{ env.CONFIG_FILE }}
-          BASE_REF: ${{ steps.pr.outputs.base_ref }}
-          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
-          CHANGED_FILES: ${{ steps.changed.outputs.files }}
-          HEAD_UNITS_FILE: ${{ runner.temp }}/tfpr-head-units.json
           REMOVED_REPORT_FILE: ${{ runner.temp }}/tfpr-removed.md
-        run: '"$TFPR_BIN" detect-removed-units'
+        run: '"$TFPR_BIN" check-discovery'
 
       # A status description has no room to say which units went, or what the
       # reader has to do by hand about it, so put that on the PR.
       - name: Report removed units
         if: >-
           steps.auth.outputs.run == 'true' &&
-          steps.removed.outputs.removed_units != ''
+          steps.discovery.outputs.removed_units != ''
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -398,7 +531,7 @@ jobs:
           steps.auth.outputs.run == 'true' &&
           github.event_name == 'issue_comment' &&
           steps.parse.outputs.project_filter != '' &&
-          steps.select.outputs.count == '0'
+          steps.discovery.outputs.count == '0'
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -472,6 +605,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           PR_NUMBER: ${{ steps.parse.outputs.pr_number }}
+          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
           ALLOW_UNREVIEWED_APPLY: ${{ vars.TFPR_ALLOW_UNREVIEWED_APPLY }}
         run: '"$TFPR_BIN" check-approval'
 
@@ -482,13 +616,13 @@ jobs:
         id: ctx
         if: steps.auth.outputs.run == 'true'
         env:
-          PROJECTS: ${{ steps.select.outputs.projects }}
-          COUNT: ${{ steps.select.outputs.count }}
-          UNATTRIBUTED: ${{ steps.select.outputs.unattributed }}
+          PROJECTS: ${{ steps.discovery.outputs.projects }}
+          COUNT: ${{ steps.discovery.outputs.count }}
+          UNATTRIBUTED: ${{ steps.discovery.outputs.unattributed }}
           TF_CHANGED: ${{ steps.changed.outputs.tf_changed }}
-          REMOVED_UNITS: ${{ steps.removed.outputs.removed_units }}
-          REMOVED_CHECK: ${{ steps.removed.outputs.removed_check }}
-          REMOVED_EXPLAINS_TF: ${{ steps.removed.outputs.removed_explains_tf }}
+          REMOVED_UNITS: ${{ steps.discovery.outputs.removed_units }}
+          REMOVED_CHECK: ${{ steps.discovery.outputs.removed_check }}
+          REMOVED_EXPLAINS_TF: ${{ steps.discovery.outputs.removed_explains_tf }}
           HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
           RUN_ID: ${{ github.run_id }}
           RUN_NUMBER: ${{ github.run_number }}
@@ -512,7 +646,8 @@ jobs:
       - name: Decide apply
         id: apply_gate
         env:
-          RUN: ${{ steps.auth.outputs.run }}
+          # A selection the static floor contradicts is never applied.
+          RUN: ${{ steps.discovery.outputs.mismatch == '' && steps.auth.outputs.run || 'false' }}
           COMMAND: ${{ steps.parse.outputs.command }}
           COUNT: ${{ steps.ctx.outputs.count }}
           APPROVED: ${{ steps.approval.outputs.approved }}
@@ -599,7 +734,7 @@ jobs:
         id: running
         if: >-
           steps.auth.outputs.run == 'true' &&
-          steps.select.outputs.count != '0' &&
+          steps.discovery.outputs.count != '0' &&
           steps.pr.outputs.head_sha != '' &&
           steps.approval.outputs.approved != 'false' &&
           steps.license.outputs.apply_refused != 'true'
@@ -619,7 +754,7 @@ jobs:
         continue-on-error: true
         if: >-
           steps.auth.outputs.run == 'true' &&
-          steps.select.outputs.count != '0' &&
+          steps.discovery.outputs.count != '0' &&
           steps.pr.outputs.head_sha != '' &&
           steps.approval.outputs.approved != 'false' &&
           steps.license.outputs.apply_refused != 'true'
@@ -630,7 +765,7 @@ jobs:
           WAITING_FOR: ${{ steps.running.outputs.running }}
           WAITING_FOR_URL: ${{ steps.running.outputs.running_url }}
           COMMAND: ${{ steps.parse.outputs.command }}
-          PROJECTS: ${{ steps.select.outputs.projects }}
+          PROJECTS: ${{ steps.discovery.outputs.projects }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           # Name and stamp the checks with this run, so concurrent runs on the
           # same commit neither collide in the checks list nor complete each
@@ -862,6 +997,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
           PR_NUMBER: ${{ needs.resolve.outputs.pr_number }}
           HEAD_SHA: ${{ needs.resolve.outputs.head_sha }}
+          COMMAND: ${{ needs.resolve.outputs.command }}
         run: '"$TFPR_BIN" verify-head'
 
       # The approval gate ran back in resolve. A review dismissed during
@@ -873,6 +1009,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           PR_NUMBER: ${{ needs.resolve.outputs.pr_number }}
+          HEAD_SHA: ${{ needs.resolve.outputs.head_sha }}
           ALLOW_UNREVIEWED_APPLY: ${{ vars.TFPR_ALLOW_UNREVIEWED_APPLY }}
           APPROVAL_MODE: recheck
         run: '"$TFPR_BIN" check-approval'
@@ -976,10 +1113,13 @@ jobs:
         run: '"$TFPR_BIN" checks link'
 
       - name: Apply in dependency order
+        id: apply_ordered
         env:
           GH_TOKEN: ${{ github.token }}
           GH_CHECKS_TOKEN: ${{ steps.checks_token.outputs.token || github.token }}
           GH_REPO: ${{ github.repository }}
+          # The reviewed plan is read only from plan rows this App wrote.
+          CHECKS_APP_SLUG: ${{ steps.checks_token.outputs.app-slug }}
           PR_NUMBER: ${{ needs.resolve.outputs.pr_number }}
           HEAD_SHA: ${{ needs.resolve.outputs.head_sha }}
           PROJECTS: ${{ needs.resolve.outputs.projects }}
@@ -993,6 +1133,8 @@ jobs:
           TFPR_MINIMIZE_OUTDATED: ${{ vars.TFPR_MINIMIZE_OUTDATED }}
           TFPR_CHECK_LIVE_LOG: ${{ vars.TFPR_CHECK_LIVE_LOG }}
           INIT_ARGS: ${{ vars.TFPR_INIT_ARGS }}
+          # Reports outside the checkout PR code runs in (#395).
+          TFPR_REPORT_DIR: ${{ runner.temp }}/tfpr-out
           # For consumers that list the cost gate under the apply stage (#264, #270).
           INFRACOST_API_KEY: ${{ secrets.INFRACOST_API_KEY }}
           # /apply --force: apply even when the plan differs from the reviewed one.
@@ -1004,17 +1146,31 @@ jobs:
           TFPR_LOCK_STORAGE_ACCOUNT: ${{ vars.TFPR_LOCK_STORAGE_ACCOUNT }}
           TFPR_LOCK_TABLE: ${{ vars.TFPR_LOCK_TABLE }}
           TFPR_DISABLE_LOCKS: ${{ vars.TFPR_DISABLE_LOCKS }}
-        run: TF_PLUGIN_CACHE_DIR="$HOME/.terraform.d/plugin-cache" "$TFPR_BIN" apply-ordered
+        # exec: no shell is left holding the tokens for PR code to read (#395).
+        run: TF_PLUGIN_CACHE_DIR="$HOME/.terraform.d/plugin-cache" exec "$TFPR_BIN" apply-ordered
 
+      # One job walks every unit, so its results travel as one artifact; the
+      # gate still reads only the labels resolve selected.
       - name: Upload gate results
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: gate-apply
           path: |
-            gate/*.status
-            gate/*.lock
+            ${{ runner.temp }}/tfpr-gate/*.status
+            ${{ runner.temp }}/tfpr-gate/*.lock
           retention-days: 1
+
+      # Reports a push that landed while terraform ran; the apply is already done.
+      - name: Re-check PR head after apply
+        if: always() && steps.apply_ordered.outcome != 'skipped'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ needs.resolve.outputs.pr_number }}
+          HEAD_SHA: ${{ needs.resolve.outputs.head_sha }}
+          VERIFY_HEAD_PHASE: post-apply
+        run: '"$TFPR_BIN" verify-head'
 
   # Release every cross-PR unit lock the PR holds. Two triggers land here: the
   # PR closing (merged or not; automatic) and an explicit /unlock comment (to
@@ -1036,6 +1192,11 @@ jobs:
       (vars.TFPR_LOCK_STORAGE_ACCOUNT != '' || vars.BACKEND_AZURE_STORAGE_ACCOUNT_NAME != '')
     runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
     environment: ${{ vars.TFPR_UNLOCK_ENVIRONMENT || vars.TFPR_PLAN_ENVIRONMENT || 'plan' }}
+    # Joins the PR's plan and apply family, so closing the PR mid-apply waits
+    # for the apply instead of releasing its locks under it.
+    concurrency:
+      group: tfpr-pr-${{ needs.resolve.outputs.pr_number }}
+      cancel-in-progress: false
     permissions:
       contents: read
       id-token: write        # Azure OIDC login
@@ -1204,12 +1365,30 @@ jobs:
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
 
+      # Name exactly the artifacts this run's selection produces: one per
+      # label from the plan matrix, or the apply walk's single artifact.
+      - name: Expected gate results
+        id: gate_names
+        if: needs.resolve.outputs.count != '0'
+        env:
+          COMMAND: ${{ needs.resolve.outputs.command }}
+          PROJECTS: ${{ needs.resolve.outputs.projects }}
+        run: |
+          if [ "$COMMAND" = apply ]; then
+            pattern=gate-apply
+          else
+            pattern="$(jq -r '
+              [.[].label | gsub("/"; "__") | gsub("(?<c>[][{}()*?!+@,|\\\\])"; "\\\(.c)") | "gate-" + .]
+              | if length == 1 then .[0] else "{" + join(",") + "}" end' <<<"$PROJECTS")"
+          fi
+          echo "pattern=$pattern" >>"$GITHUB_OUTPUT"
+
       - name: Download gate results
         if: needs.resolve.outputs.count != '0'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: gate-*
-          path: gate
+          pattern: ${{ steps.gate_names.outputs.pattern }}
+          path: ${{ runner.temp }}/tfpr-gate
           merge-multiple: true
       # Complete the pending gate check with the verdict (or create it
       # completed when this run never opened one). The run id is the check
@@ -1225,6 +1404,7 @@ jobs:
           TF_CHANGED: ${{ needs.resolve.outputs.tf_changed }}
           UNATTRIBUTED: ${{ needs.resolve.outputs.unattributed }}
           PROJECT_FILTER: ${{ needs.resolve.outputs.project_filter }}
+          PROJECTS: ${{ needs.resolve.outputs.projects }}
           FULL_PROJECTS: ${{ needs.resolve.outputs.full_projects }}
           FULL_UNATTRIBUTED: ${{ needs.resolve.outputs.full_unattributed }}
           # Only rows this App wrote may decide a filtered run's gate.
@@ -1232,7 +1412,8 @@ jobs:
           REMOVED_UNITS: ${{ needs.resolve.outputs.removed_units }}
           REMOVED_CHECK: ${{ needs.resolve.outputs.removed_check }}
           REMOVED_EXPLAINS_TF: ${{ needs.resolve.outputs.removed_explains_tf }}
-          RESULT_DIR: gate
+          DISCOVERY_MISMATCH: ${{ needs.resolve.outputs.discovery_mismatch }}
+          RESULT_DIR: ${{ runner.temp }}/tfpr-gate
           RUN_ID: ${{ needs.resolve.outputs.check_run_id }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: '"$TFPR_BIN" merge-gate'
@@ -1250,4 +1431,5 @@ jobs:
           HEAD_SHA: ${{ needs.resolve.outputs.head_sha }}
           RUN_ID: ${{ needs.resolve.outputs.check_run_id }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          COMMAND: ${{ needs.resolve.outputs.command }}
         run: '"$TFPR_BIN" checks cancel'

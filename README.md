@@ -25,7 +25,8 @@ infrastructure repository and pin all of them to one tag:
 
 The `uses:` ref is the only pin. Each job installs the runtime attached to
 the release of that tag: tfpr, the bundled gate scripts and setup-tools,
-checked against `SHA256SUMS`. Tags are immutable; there is no moving major
+checked against the `SHA256SUMS` file committed at that tag, not the
+release's copy. Tags are immutable; there is no moving major
 tag.
 
 The callers need the variables and secrets the bootstrap sets on a generated
@@ -37,7 +38,8 @@ https://docs.nrit.cloud.
 ## About this repository
 
 Nothing is authored here. The core's release job writes this tree, tags it
-with the core's version, and records the core commit in `ENGINE_COMMIT`.
+with the core's version, records the core commit in `ENGINE_COMMIT`, and
+commits the runtime checksums in `SHA256SUMS`.
 Branches under `preview/` are short-lived smoke builds. The files here are
 licensed under Apache-2.0 (see LICENSE); the private core is not. Open issues on the
 docs site's contact address, not here.

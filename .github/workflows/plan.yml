@@ -179,6 +179,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
           PR_NUMBER: ${{ inputs.pr_number }}
           HEAD_SHA: ${{ inputs.head_sha }}
+          COMMAND: ${{ inputs.command }}
         run: '"$TFPR_BIN" verify-head'
 
       # setup-tools' local action path cannot take an expression, so vendored and
@@ -264,13 +265,14 @@ jobs:
           PROJECT_DIR: ${{ matrix.project.dir }}
           PROJECT_LABEL: ${{ matrix.project.label }}
           PROJECT_TOOL: ${{ matrix.project.tool }}
-          REPORT_FILE: ${{ github.workspace }}/.tfpr/${{ matrix.project.label }}.md
-          CHECK_TEXT_FILE: ${{ github.workspace }}/.tfpr/${{ matrix.project.label }}.check.md
+          REPORT_FILE: ${{ runner.temp }}/tfpr-out/${{ matrix.project.label }}.md
+          CHECK_TEXT_FILE: ${{ runner.temp }}/tfpr-out/${{ matrix.project.label }}.check.md
           TFPR_TRIGGER_EVENT: ${{ inputs.trigger_event }}
           TFPR_TRIGGER_COMMAND: ${{ inputs.trigger_command }}
           TFPR_TRIGGER_ACTOR: ${{ inputs.trigger_actor }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           STEPS_JSON: ${{ toJson(matrix.project.steps) }}
+          EXTRA_ENV_JSON: ${{ toJson(matrix.project.extra_env) }}
           INFRACOST_API_KEY: ${{ secrets.INFRACOST_API_KEY }}
           INIT_ARGS: ${{ vars.TFPR_INIT_ARGS }}
           # Stamps the reviewed-plan summary the report embeds for the apply
@@ -288,7 +290,8 @@ jobs:
           TFPR_LOCK_STORAGE_ACCOUNT: ${{ vars.TFPR_LOCK_STORAGE_ACCOUNT }}
           TFPR_LOCK_TABLE: ${{ vars.TFPR_LOCK_TABLE }}
           TFPR_DISABLE_LOCKS: ${{ vars.TFPR_DISABLE_LOCKS }}
-        run: TF_PLUGIN_CACHE_DIR="$HOME/.terraform.d/plugin-cache" "$TFPR_BIN" run-project
+        # exec: no shell is left holding the tokens for PR code to read (#395).
+        run: TF_PLUGIN_CACHE_DIR="$HOME/.terraform.d/plugin-cache" exec "$TFPR_BIN" run-project
 
       - name: Post result comment
         if: always()
@@ -296,7 +299,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           PR_NUMBER: ${{ inputs.pr_number }}
-          REPORT_FILE: ${{ github.workspace }}/.tfpr/${{ matrix.project.label }}.md
+          REPORT_FILE: ${{ runner.temp }}/tfpr-out/${{ matrix.project.label }}.md
           TFPR_MINIMIZE_OUTDATED: ${{ vars.TFPR_MINIMIZE_OUTDATED }}
         run: '"$TFPR_BIN" comment'
 
@@ -314,7 +317,7 @@ jobs:
           PROJECT_LABEL: ${{ matrix.project.label }}
           TF_STATUS: ${{ steps.tf.outcome == 'cancelled' && 'cancelled' || steps.tf.outputs.status }}
           TF_SUMMARY: ${{ steps.tf.outputs.summary }}
-          CHECK_TEXT_FILE: ${{ github.workspace }}/.tfpr/${{ matrix.project.label }}.check.md
+          CHECK_TEXT_FILE: ${{ runner.temp }}/tfpr-out/${{ matrix.project.label }}.check.md
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           RUN_ID: ${{ inputs.check_run_id || github.run_id }}
           RUN_NUMBER: ${{ inputs.check_run_number || github.run_number }}
@@ -326,28 +329,36 @@ jobs:
       # Record this project's outcome for the merge-gate aggregation. The gate
       # job is in the parent workflow; artifacts are scoped to the whole run, so
       # it still finds these. A cancelled step has no status output; recording
-      # it as cancelled keeps it from reading as a plan error.
+      # it as cancelled keeps it from reading as a plan error. The results live
+      # under the runner temp dir, never the PR checkout, so a committed file
+      # cannot stand in for a unit's result (#396).
       - name: Record gate result
+        id: gate_result
         if: always()
         env:
           LABEL: ${{ matrix.project.label }}
           STATUS: ${{ steps.tf.outcome == 'cancelled' && 'cancelled' || steps.tf.outputs.status }}
           LOCK_HOLDER: ${{ steps.tf.outputs.lock_holder }}
         run: |
-          mkdir -p gate
-          printf '%s' "${STATUS:-error}" > "gate/${LABEL//\//__}.status"
+          base="${LABEL//\//__}"
+          dir="$RUNNER_TEMP/tfpr-gate"
+          mkdir -p "$dir"
+          printf '%s' "${STATUS:-error}" > "$dir/$base.status"
           if [ -n "$LOCK_HOLDER" ]; then
-            printf '%s' "$LOCK_HOLDER" > "gate/${LABEL//\//__}.lock"
+            printf '%s' "$LOCK_HOLDER" > "$dir/$base.lock"
           fi
+          echo "artifact=gate-$base" >>"$GITHUB_OUTPUT"
 
+      # One artifact per unit, named after its label, so the gate downloads
+      # exactly the units resolve selected.
       - name: Upload gate result
-        if: always()
+        if: always() && steps.gate_result.outputs.artifact != ''
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: gate-${{ strategy.job-index }}
+          name: ${{ steps.gate_result.outputs.artifact }}
           path: |
-            gate/*.status
-            gate/*.lock
+            ${{ runner.temp }}/tfpr-gate/*.status
+            ${{ runner.temp }}/tfpr-gate/*.lock
           retention-days: 1
 
       # locked does not fail the job: a lock is contention, not a defect, and
