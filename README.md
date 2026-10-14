@@ -1,15 +1,13 @@
 # tf-pr-ops
 
-The public entrypoint of the NRIT pull-request ops engine: plan and apply
-Terraform and Terragrunt from a pull request, driven by comments, with unit
-locks, drift detection, and policy, scan, and cost gates.
+Plan and apply Terraform and Terragrunt from a pull request, driven by
+comments, with unit locks, drift detection, and policy, scan, and cost gates.
 
 This repository holds the released copies of the reusable workflows, the
-dispatch action, and the caller examples. The engine itself (the `tfpr`
-binary and the gate scripts) lives in the private core repository
-`nrit-solutions/nrit-tf-pr-ops`. Every job here checks the core out at the
-same version with a GitHub App token that NRIT issues per organization, so a
-pinned tag always runs the code it was released with.
+dispatch action, and the caller examples. Each release also carries the
+runtime: the `tfpr` binary, the bundled gate scripts and the setup-tools
+action. Consumer jobs install that runtime from the release. They need no
+access to any other repository and no credential beyond the workflow token.
 
 ## Consuming
 
@@ -20,26 +18,24 @@ infrastructure repository and pin all of them to one tag:
 | --- | --- |
 | `caller-tf-pr-ops-pr.yml` | the pull_request path: lint, then the dispatch action |
 | `caller-tf-pr-ops-unlock.yml` | releases unit locks when a pull request closes |
-| `caller-tf-pr-ops.yml` | comment commands (`/plan`, `/apply`, `/unlock`) and dispatched work |
+| `caller-tf-pr-ops.yml` | comment commands (`/plan`, `/apply`, `/unlock`, `/help`) and dispatched work |
 | `caller-drift.yml` | the scheduled drift sweep |
 
 The `uses:` ref is the only pin. Each job installs the runtime attached to
-the release of that tag: tfpr, the bundled gate scripts and setup-tools,
-checked against the `SHA256SUMS` file committed at that tag, not the
-release's copy. Tags are immutable; there is no moving major
-tag.
+the release of that tag and checks every file against the `SHA256SUMS` file
+committed at that tag, not the release's copy. Tags are immutable. There is
+no moving major tag.
 
-The callers need the variables and secrets the bootstrap sets on a generated
-repository, including the `TFPR_LICENSE` and `TFPR_ENTITLEMENT` repository
-variables (see
-https://docs.nrit.cloud/operations/license/). Setup, commands, gates, and operations are documented at
-https://docs.nrit.cloud.
+The callers need the variables, secrets and environments listed at
+https://docs.nrit.cloud/setup/secrets-and-variables/, including the
+`TFPR_LICENSE` and `TFPR_ENTITLEMENT` variables that `/apply` needs (see
+https://docs.nrit.cloud/operations/license/). Setup, commands, gates and
+operations are documented at https://docs.nrit.cloud/.
 
 ## About this repository
 
-Nothing is authored here. The core's release job writes this tree, tags it
-with the core's version, records the core commit in `ENGINE_COMMIT`, and
-commits the runtime checksums in `SHA256SUMS`.
-Branches under `preview/` are short-lived smoke builds. The files here are
-licensed under Apache-2.0 (see LICENSE); the private core is not. Open issues on the
-docs site's contact address, not here.
+Nothing is authored here. A release job writes this tree, tags it, records
+the source commit in `ENGINE_COMMIT`, and commits the runtime checksums in
+`SHA256SUMS`. Branches under `preview/` are short-lived smoke builds. The
+files here are licensed under Apache-2.0 (see LICENSE). Use the contact link
+on the docs site for questions. Issues are not tracked here.
