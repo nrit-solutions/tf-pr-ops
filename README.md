@@ -11,13 +11,14 @@ access to any other repository and no credential beyond the workflow token.
 
 ## Consuming
 
-Copy the four callers from `examples/` into `.github/workflows/` of an
+Copy the five callers from `examples/` into `.github/workflows/` of an
 infrastructure repository and pin all of them to one tag:
 
 | Caller | Purpose |
 | --- | --- |
 | `caller-tf-pr-ops-pr.yml` | the pull_request path: lint, then the dispatch action |
 | `caller-tf-pr-ops-unlock.yml` | releases unit locks when a pull request closes |
+| `caller-tf-pr-ops-review.yml` | refreshes the approval row when a review is submitted or dismissed |
 | `caller-tf-pr-ops.yml` | comment commands (`/plan`, `/apply`, `/unlock`, `/help`) and dispatched work |
 | `caller-drift.yml` | the scheduled drift sweep |
 

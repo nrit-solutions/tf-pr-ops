@@ -1,7 +1,7 @@
 # Ops caller for tf-pr-ops: comment commands and dispatched work. Copy to a
 # consumer repo as .github/workflows/tf-pr-ops.yml, next to tf-pr-ops-pr.yml
-# (the PR caller) and drift.yml. This file is stable: engine changes never
-# need a caller edit. Bump the uses: ref to move to a new engine release;
+# (the PR caller), tf-pr-ops-review.yml (the review refresh) and drift.yml.
+# This file is stable: engine changes never need a caller edit. Bump the uses: ref to move to a new engine release;
 # the jobs install the runtime of that release.
 name: tf-pr-ops ops
 
@@ -12,7 +12,7 @@ on:
     inputs:
       command:
         type: choice
-        options: [plan, apply, unlock]
+        options: [plan, apply, unlock, review]
         default: plan
       project:
         required: false
@@ -34,7 +34,7 @@ permissions:
 
 jobs:
   engine:
-    uses: nrit-solutions/tf-pr-ops/.github/workflows/terraform-pr-ops.yml@v10.2.3 # x-release-please-version
+    uses: nrit-solutions/tf-pr-ops/.github/workflows/terraform-pr-ops.yml@v11.0.0 # x-release-please-version
     with:
       command: ${{ inputs.command || 'plan' }}
       project: ${{ inputs.project || '' }}

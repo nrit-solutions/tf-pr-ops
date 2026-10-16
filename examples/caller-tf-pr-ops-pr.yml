@@ -1,7 +1,8 @@
 # PR caller for tf-pr-ops. Copy to a consumer repo as
 # .github/workflows/tf-pr-ops-pr.yml, next to tf-pr-ops.yml (the ops caller),
 # tf-pr-ops-unlock.yml (the closed-event unlock) and drift.yml. One version
-# pin: the dispatch action knows its own ref.
+# pin: the dispatch action knows its own ref. tf-pr-ops-review.yml refreshes
+# the approval row when a review lands.
 #
 # The pre-commit job is consumer-owned convention, not engine contract: it
 # runs the hooks from this repository's own .pre-commit-config.yaml, and you
@@ -54,4 +55,4 @@ jobs:
     if: github.event.repository.is_template != true
     runs-on: ubuntu-latest
     steps:
-      - uses: nrit-solutions/tf-pr-ops/.github/actions/dispatch@v10.2.3 # x-release-please-version
+      - uses: nrit-solutions/tf-pr-ops/.github/actions/dispatch@v11.0.0 # x-release-please-version

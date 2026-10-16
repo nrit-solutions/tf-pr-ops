@@ -1,11 +1,12 @@
 name: tf-pr-ops dispatch
 description: >-
   The engine's pull_request path: hand the pull request to the consumer's
-  ops workflow on the default branch, plan for an open PR and unlock for a
-  closed one. Nothing else runs here. This job runs from the PR branch's own
-  workflow file, which any writer controls, so it holds no secret, creates no
-  check and decides nothing: the ops run resolves the PR from the API,
-  creates every check and completes the merge gate (#348).
+  ops workflow on the default branch: plan for an open PR, unlock for a
+  closed one, and review for a submitted or dismissed review. Nothing else
+  runs here. This job runs from the PR branch's own workflow file, which any
+  writer controls, so it holds no secret, creates no check and decides
+  nothing: the ops run resolves the PR from the API, creates every check
+  and completes the merge gate (#348).
 
 inputs:
   ops-workflow:
@@ -29,13 +30,16 @@ runs:
         REPO: ${{ github.repository }}
         WORKFLOW_FILE: ${{ inputs.ops-workflow }}
         DISPATCH_REF: ${{ github.event.repository.default_branch }}
+        EVENT_NAME: ${{ github.event_name }}
         ACTION: ${{ github.event.action }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
         HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
         BEFORE_SHA: ${{ github.event.before }}
         ACTOR: ${{ github.actor }}
       run: |
-        if [[ "$ACTION" == closed ]]; then
+        if [[ "$EVENT_NAME" == pull_request_review ]]; then
+          inputs=$(printf '{"command":"review","pr_number":"%s"}' "$PR_NUMBER")
+        elif [[ "$ACTION" == closed ]]; then
           inputs=$(printf '{"command":"unlock","pr_number":"%s"}' "$PR_NUMBER")
         else
           if [[ "$HEAD_REPO" != "$REPO" ]]; then
