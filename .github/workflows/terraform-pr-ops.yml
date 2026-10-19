@@ -76,7 +76,7 @@ on:
 
 # id-token is NOT granted here: the run/apply jobs request it per-job, because a
 # tenant that customizes the OIDC subject to require an `environment` claim (as
-# nrit-alz-live does) fails any token-capable job that has no environment. resolve
+# bootstrapped tenants do) fails any token-capable job that has no environment. resolve
 # and gate never log in to Azure, so they must not carry id-token.
 permissions:
   contents: read

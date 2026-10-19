@@ -66,6 +66,7 @@ files=()
 while read -r sum name; do
   [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]] || die "unexpected file name '$name' in the $tag checksums"
   [[ "$name" == tfpr_linux_* && "$name" != "$binary" ]] && continue
+  [[ "$name" == ENGINE-LICENSE.txt ]] && continue
   files+=("$name")
   printf '%s  %s\n' "$sum" "$name" >>"$tmp/wanted.sums"
 done <"$tmp/SHA256SUMS"

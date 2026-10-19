@@ -38,5 +38,9 @@ operations are documented at https://docs.nrit.cloud/.
 Nothing is authored here. A release job writes this tree, tags it, records
 the source commit in `ENGINE_COMMIT`, and commits the runtime checksums in
 `SHA256SUMS`. Branches under `preview/` are short-lived smoke builds. The
-files here are licensed under Apache-2.0 (see LICENSE). Use the contact link
-on the docs site for questions. Issues are not tracked here.
+files in this tree are licensed under Apache-2.0 (see LICENSE). The runtime
+attached to each release (the `tfpr` binaries, the gate scripts, `lib.sh`
+and `setup-tools.action.yml`) is proprietary and is not covered by that
+license: see `ENGINE-LICENSE.txt` on the release. `install-runtime.sh` and
+`SHA256SUMS` are Apache-2.0 in both places. Use the contact link on the docs
+site for questions. Issues are not tracked here.

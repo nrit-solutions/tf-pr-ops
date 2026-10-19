@@ -98,13 +98,13 @@ jobs:
     env:
       ARM_USE_OIDC: "true"
       ARM_USE_AZUREAD: "true"
-      # Identity via OIDC: prefer the consumer's Action variables (nrit-alz-live
-      # uses AZURE_*), fall back to secrets (the demos set ARM_*).
+      # Identity via OIDC: prefer the consumer's Action variables (AZURE_*, as
+      # the bootstrap sets them), fall back to secrets (the demos set ARM_*).
       ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
       ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
       ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-      # Terragrunt backend config: root.hcl reads these via get_env(). Consumers
-      # (e.g. nrit-alz-live) set them as Action variables; empty is harmless in
+      # Terragrunt backend config: root.hcl reads these via get_env(). Terragrunt
+      # consumers set them as Action variables; empty is harmless in
       # plain Terraform mode, where the backend comes from backend.tf instead.
       AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
       AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
