@@ -1,12 +1,12 @@
-# Review caller for tf-pr-ops. Copy to a consumer repo as
-# .github/workflows/tf-pr-ops-review.yml, next to tf-pr-ops-pr.yml.
+# Review caller for tfpr. Copy to a consumer repo as
+# .github/workflows/tfpr-review.yml, next to tfpr-pr.yml.
 #
 # A submitted or dismissed review starts no plan, so without this file the
-# "tf-pr-ops / approval" row keeps the verdict of the last run until the
+# "tfpr / approval" row keeps the verdict of the last run until the
 # next push or comment (#431). The dispatch action only dispatches a review
 # refresh, so no credentials are needed here. Its own workflow, like the
 # unlock caller, so a review adds no skipped rows to the PR (#206).
-name: tf-pr-ops review
+name: tfpr review
 
 on:
   pull_request_review:
@@ -21,4 +21,4 @@ jobs:
     if: github.event.repository.is_template != true
     runs-on: ubuntu-latest
     steps:
-      - uses: nrit-solutions/tf-pr-ops/.github/actions/dispatch@v11.0.2 # x-release-please-version
+      - uses: nrit-solutions/tfpr/.github/actions/dispatch@v12.0.0 # x-release-please-version

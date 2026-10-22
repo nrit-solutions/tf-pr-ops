@@ -10,7 +10,7 @@
 # Env in: TFPR_RUNTIME_REF (job.workflow_ref, or a bare release tag),
 # TFPR_RUNTIME_SHA (job.workflow_sha, the entrypoint commit holding the
 # workflow), optional GH_TOKEN (read the tree with it),
-# TFPR_RUNTIME_REPO (default nrit-solutions/tf-pr-ops),
+# TFPR_RUNTIME_REPO (default nrit-solutions/tfpr),
 # TFPR_RUNTIME_BASE_URL (the release download base; tests point it at a
 # local directory), TFPR_RUNTIME_SUMS_URL (the tree's SHA256SUMS; tests point
 # it at a local file), TFPR_RUNTIME_DIR (default $RUNNER_TEMP/tfpr-engine,
@@ -23,7 +23,7 @@ set -euo pipefail
 
 die() { echo "::error::$*" >&2; exit 1; }
 
-repo="${TFPR_RUNTIME_REPO:-nrit-solutions/tf-pr-ops}"
+repo="${TFPR_RUNTIME_REPO:-nrit-solutions/tfpr}"
 ref="${TFPR_RUNTIME_REF:?TFPR_RUNTIME_REF is required}"
 sha="${TFPR_RUNTIME_SHA:?TFPR_RUNTIME_SHA is required}"
 [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || die "TFPR_RUNTIME_SHA must be a full commit SHA, got '$sha'"

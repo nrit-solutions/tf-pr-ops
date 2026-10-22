@@ -1,12 +1,12 @@
-# Unlock caller for tf-pr-ops. Copy to a consumer repo as
-# .github/workflows/tf-pr-ops-unlock.yml, next to tf-pr-ops-pr.yml.
+# Unlock caller for tfpr. Copy to a consumer repo as
+# .github/workflows/tfpr-unlock.yml, next to tfpr-pr.yml.
 #
 # Releases the PR's cross-PR unit locks when it closes. Its own workflow so
 # a merged PR's checks list shows one row that reads as lock release, instead
 # of a skipped pre-commit row and a second dispatch row stacked on the last
 # real run (#206). The dispatch action only dispatches the unlock, so no
 # credentials are needed here.
-name: tf-pr-ops unlock
+name: tfpr unlock
 
 on:
   pull_request:
@@ -21,4 +21,4 @@ jobs:
     if: github.event.repository.is_template != true
     runs-on: ubuntu-latest
     steps:
-      - uses: nrit-solutions/tf-pr-ops/.github/actions/dispatch@v11.0.2 # x-release-please-version
+      - uses: nrit-solutions/tfpr/.github/actions/dispatch@v12.0.0 # x-release-please-version

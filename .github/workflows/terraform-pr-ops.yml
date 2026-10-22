@@ -6,16 +6,16 @@ name: terraform-pr-ops
 # that split keeps every native row of this workflow off the PR. Everything
 # that decides or writes a check runs here, from the default branch, because
 # a pull_request run executes the PR branch's own workflow file (#348).
-#   - commenting "/plan" re-plans (optionally "/plan -p <name>")
-#   - commenting "/apply" applies (optionally "/apply -p <name>")
-#   - commenting "/unlock" force-releases the PR's unit locks; the PR
+#   - commenting "tfpr plan" re-plans (optionally "tfpr plan -p <name>")
+#   - commenting "tfpr apply" applies (optionally "tfpr apply -p <name>")
+#   - commenting "tfpr unlock" force-releases the PR's unit locks; the PR
 #     caller dispatches an unlock here automatically on close
-#   - commenting "/help" lists the commands
+#   - commenting "tfpr help" lists the commands
 #   - a submitted or dismissed review dispatches "review", which only
 #     refreshes the approval row on the head (#431)
 # Each run posts a fresh Digger-style report comment and completes the
-# per-project plan/apply checks. /apply respects the repo's required
-# reviews, and a "tf-pr-ops / merge-gate" check gates merge until applied
+# per-project plan/apply checks. tfpr apply respects the repo's required
+# reviews, and a "tfpr / merge-gate" check gates merge until applied
 # or no-op.
 
 on:
@@ -32,7 +32,7 @@ on:
         description: project name (blank = all)
         required: false
       # The run resolves the PR from the API; nothing it decides comes from
-      # these inputs. A dispatch by hand works like a /plan comment.
+      # these inputs. A dispatch by hand works like a tfpr plan comment.
       pr_number:
         description: the pull request to plan, apply or unlock
         required: false
@@ -103,9 +103,9 @@ jobs:
       (github.event_name != 'issue_comment' ||
        (github.event.issue.pull_request != null &&
         contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association) &&
-        (startsWith(github.event.comment.body, '/plan') ||
-         startsWith(github.event.comment.body, '/apply') ||
-         startsWith(github.event.comment.body, '/unlock'))))
+        (startsWith(github.event.comment.body, 'tfpr plan') ||
+         startsWith(github.event.comment.body, 'tfpr apply') ||
+         startsWith(github.event.comment.body, 'tfpr unlock'))))
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -294,8 +294,8 @@ jobs:
       (github.event_name != 'issue_comment' ||
        (github.event.issue.pull_request != null &&
         contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association) &&
-        (startsWith(github.event.comment.body, '/plan') ||
-         startsWith(github.event.comment.body, '/apply'))))
+        (startsWith(github.event.comment.body, 'tfpr plan') ||
+         startsWith(github.event.comment.body, 'tfpr apply'))))
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -444,9 +444,9 @@ jobs:
       (github.event_name != 'issue_comment' ||
        (github.event.issue.pull_request != null &&
         contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association) &&
-        (startsWith(github.event.comment.body, '/plan') ||
-         startsWith(github.event.comment.body, '/apply') ||
-         startsWith(github.event.comment.body, '/unlock'))))
+        (startsWith(github.event.comment.body, 'tfpr plan') ||
+         startsWith(github.event.comment.body, 'tfpr apply') ||
+         startsWith(github.event.comment.body, 'tfpr unlock'))))
     # Checks the discovery inventory and makes gh calls; no Azure, no PR code.
     # Runs on a hosted runner so it never waits on the (constrained,
     # network-scoped) self-hosted runner that run/apply use.
@@ -462,7 +462,7 @@ jobs:
       pr_number: ${{ steps.parse.outputs.pr_number }}
       # The gate needs this to tell a full run apart from a -p diagnostic.
       project_filter: ${{ steps.parse.outputs.project_filter }}
-      # /apply --force: apply even when the plan differs from the reviewed one.
+      # tfpr apply --force: apply even when the plan differs from the reviewed one.
       force: ${{ steps.parse.outputs.force }}
       projects: ${{ steps.ctx.outputs.projects }}
       count: ${{ steps.ctx.outputs.count }}
@@ -548,8 +548,8 @@ jobs:
 
       # The job filter above proves standing in the organization, not write access
       # here. Re-check the commenter's real repository permission before a command
-      # that changes something: /unlock releases the cross-PR unit locks that stop
-      # a stale plan from reverting an applied change, and /apply runs terraform.
+      # that changes something: tfpr unlock releases the cross-PR unit locks that stop
+      # a stale plan from reverting an applied change, and tfpr apply runs terraform.
       # Every later step and job keys on this step's run output, not parse's, so a
       # refusal stops the whole thing. Refused commands are answered on the PR.
       - name: Authorize command
@@ -706,11 +706,11 @@ jobs:
           gh api -X POST "repos/${GH_REPO}/issues/comments/${COMMENT_ID}/reactions" \
             -f content=confused >/dev/null || true
           gh api -X POST "repos/${GH_REPO}/issues/${PR_NUMBER}/comments" -f body="$(printf \
-            '❓ No project matches `%s`. The selector must equal a project label, name, or dir from `projects.yml` (labels are `<dir>/<name>`, or the unit path in terragrunt mode). Comment the command without `-p` to run every impacted project, or `/help` for the command list.' \
+            '❓ No project matches `%s`. The selector must equal a project label, name, or dir from `projects.yml` (labels are `<dir>/<name>`, or the unit path in terragrunt mode). Comment the command without `-p` to run every impacted project, or `tfpr help` for the command list.' \
             "$FILTER")" >/dev/null
 
       # The license state (#350). Every job checks and reports it; only an
-      # /apply is refused, here with one reply, and the apply job checks
+      # tfpr apply is refused, here with one reply, and the apply job checks
       # again. The newest revocation list is kept in the actions cache, so a
       # failed download falls back to the last good copy. The tenant comes
       # from the AZURE_TENANT_ID variable, never from a secret.
@@ -836,7 +836,7 @@ jobs:
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
 
-      # Publish the approval state as the informational "tf-pr-ops / approval"
+      # Publish the approval state as the informational "tfpr / approval"
       # check run, created completed. The approval gate above only evaluates on
       # an apply command, so a required-approval ruleset is otherwise invisible
       # until an apply is refused; this runs on plans too, so the requirement
@@ -863,7 +863,7 @@ jobs:
           ALLOW_UNREVIEWED_APPLY: ${{ vars.TFPR_ALLOW_UNREVIEWED_APPLY }}
         run: '"$TFPR_BIN" approval-status'
 
-      # Open the merge gate for this run: the required "tf-pr-ops / merge-gate"
+      # Open the merge gate for this run: the required "tfpr / merge-gate"
       # check goes in progress ("Planning 2 units", "Applying 1 unit") the
       # moment the engine takes the PR, replacing the ruleset's "Expected"
       # placeholder, and is completed by the gate job of whichever run owns
@@ -891,7 +891,7 @@ jobs:
           COUNT: ${{ steps.ctx.outputs.count }}
         run: '"$TFPR_BIN" checks gate-pending'
 
-      # Engine work still running on this pull request: a /plan or /apply on
+      # Engine work still running on this pull request: a tfpr plan or tfpr apply on
       # this head, or an apply of the previous head that a push left behind
       # (the dispatch action's before_sha hint; check runs stay on a commit
       # even after a force-push drops it). The plan or apply job below queues
@@ -943,38 +943,70 @@ jobs:
           RUN_NUMBER: ${{ github.run_number }}
         run: '"$TFPR_BIN" checks create'
 
-  # The two comment answers that resolve never sees: a refusal for an author it
-  # declines, and /help, which resolve's own filter excludes. Both are one gh
-  # call on a hosted runner, so they share a job; every job in this workflow
-  # reports a check on the pull request even when skipped, and these are skipped
-  # on every event that is not a comment.
+  # The comment answers that resolve never sees: a refusal for an author it
+  # declines, tfpr help, which resolve's own filter excludes, and a pointer for
+  # the slash commands that v12 renamed. Each is one gh call on a hosted
+  # runner, so they share a job; every job in this workflow reports a check on
+  # the pull request even when skipped, and these are skipped on every event
+  # that is not a comment.
   #
-  # Neither can fold into resolve. Resolve runs only for an author with standing
-  # in the organization, and only for /plan, /apply and /unlock; widening it
-  # would mean a checkout and a runtime install for a drive-by outsider's
-  # comment. The gh calls are inlined rather than installing tfpr for the
-  # same reason: a job that only posts one comment needs neither.
+  # None can fold into resolve. Resolve runs only for an author with standing
+  # in the organization, and only for tfpr plan, tfpr apply and tfpr unlock;
+  # widening it would mean a checkout and a runtime install for a drive-by
+  # outsider's comment. The gh calls are inlined rather than installing tfpr
+  # for the same reason: a job that only posts one comment needs neither.
   comment-reply:
     if: >-
       github.event_name == 'issue_comment' &&
       github.event.repository.is_template != true &&
       github.event.issue.pull_request != null &&
       ((!contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association) &&
-        (startsWith(github.event.comment.body, '/plan') ||
-         startsWith(github.event.comment.body, '/apply') ||
-         startsWith(github.event.comment.body, '/unlock') ||
-         startsWith(github.event.comment.body, '/help'))) ||
+        (startsWith(github.event.comment.body, 'tfpr plan') ||
+         startsWith(github.event.comment.body, 'tfpr apply') ||
+         startsWith(github.event.comment.body, 'tfpr unlock') ||
+         startsWith(github.event.comment.body, 'tfpr help'))) ||
        (contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association) &&
-        startsWith(github.event.comment.body, '/help')))
+        startsWith(github.event.comment.body, 'tfpr help')) ||
+       startsWith(github.event.comment.body, '/plan') ||
+       startsWith(github.event.comment.body, '/apply') ||
+       startsWith(github.event.comment.body, '/unlock') ||
+       startsWith(github.event.comment.body, '/help'))
     runs-on: ubuntu-latest
     permissions:
       contents: read
       pull-requests: write
     steps:
+      # Remove this step in v13: one major of pointing at the new form is
+      # enough, and a silent skip would read as a broken engine until then.
+      - name: Point to the renamed command
+        id: renamed
+        if: >-
+          startsWith(github.event.comment.body, '/plan') ||
+          startsWith(github.event.comment.body, '/apply') ||
+          startsWith(github.event.comment.body, '/unlock') ||
+          startsWith(github.event.comment.body, '/help')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+          BODY: ${{ github.event.comment.body }}
+        run: |
+          first="${BODY%%$'\n'*}"
+          first="${first%$'\r'}"
+          [[ "$first" =~ ^/(plan|apply|unlock|help)([[:blank:]]|$) ]] || exit 0
+          old="${first%%[[:blank:]]*}"
+          gh api -X POST "repos/${GH_REPO}/issues/comments/${COMMENT_ID}/reactions" \
+            -f content=confused >/dev/null || true
+          gh api -X POST "repos/${GH_REPO}/issues/${PR_NUMBER}/comments" -f body="$(printf \
+            'ℹ️ **Command renamed**: `%s` is now `tfpr %s`. Nothing ran. Comment `tfpr %s` instead, with the same flags. `tfpr help` lists every command.' \
+            "$old" "${old#/}" "${old#/}")" >/dev/null
+
       # A silently skipped workflow reads as a broken engine, so say what
       # happened and why.
       - name: Refuse the command
         if: >-
+          startsWith(github.event.comment.body, 'tfpr ') &&
           !contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
         env:
           GH_TOKEN: ${{ github.token }}
@@ -986,14 +1018,15 @@ jobs:
           gh api -X POST "repos/${GH_REPO}/issues/comments/${COMMENT_ID}/reactions" \
             -f content=confused >/dev/null || true
           gh api -X POST "repos/${GH_REPO}/issues/${PR_NUMBER}/comments" -f body="$(printf \
-            '🚫 **Command refused**: `@%s` is not authorized to run Terraform commands here. Only repository owners, organization members and collaborators can run `/plan` and `/apply`. Ask one of them to run the command.' \
+            '🚫 **Command refused**: `@%s` is not authorized to run Terraform commands here. Only repository owners, organization members and collaborators can run `tfpr plan` and `tfpr apply`. Ask one of them to run the command.' \
             "$ACTOR")" >/dev/null
 
-      # Answer /help without discovery, cloud credentials, or an engine
-      # checkout. The job gate above sends an unauthorized /help to the refusal
+      # Answer tfpr help without discovery, cloud credentials, or an engine
+      # checkout. The job gate above sends an unauthorized tfpr help to the refusal
       # instead of here, so it is never answered twice.
       - name: Post the command list
         if: >-
+          startsWith(github.event.comment.body, 'tfpr help') &&
           contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
         env:
           GH_TOKEN: ${{ github.token }}
@@ -1004,19 +1037,19 @@ jobs:
           gh api -X POST "repos/${GH_REPO}/issues/comments/${COMMENT_ID}/reactions" \
             -f content=eyes >/dev/null || true
           gh api -X POST "repos/${GH_REPO}/issues/${PR_NUMBER}/comments" -F body=@- >/dev/null <<'EOF'
-          ### tf-pr-ops commands
+          ### tfpr commands
 
           | Comment | Effect |
           | --- | --- |
-          | `/plan` | Plan changed projects |
-          | `/plan -p <label>` | Plan one project and its dependents (label, name, or dir) |
-          | `/apply` | Apply changed projects in dependency order (requires the repo's required reviews) |
-          | `/apply -p <label>` | Apply exactly one project, no dependents |
-          | `/apply --force` | Apply even when the plan changed since it was reviewed |
-          | `/unlock` | Force-release this PR's unit locks |
-          | `/help` | Show this message |
+          | `tfpr plan` | Plan changed projects |
+          | `tfpr plan -p <label>` | Plan one project and its dependents (label, name, or dir) |
+          | `tfpr apply` | Apply changed projects in dependency order (requires the repo's required reviews) |
+          | `tfpr apply -p <label>` | Apply exactly one project, no dependents |
+          | `tfpr apply --force` | Apply even when the plan changed since it was reviewed |
+          | `tfpr unlock` | Force-release this PR's unit locks |
+          | `tfpr help` | Show this message |
 
-          Merge is gated by the `tf-pr-ops / merge-gate` check: it goes green when the latest plan is clean or the PR is applied.
+          Merge is gated by the `tfpr / merge-gate` check: it goes green when the latest plan is clean or the PR is applied.
           EOF
 
   # Plan every impacted project in parallel. The matrix lives in a called
@@ -1062,7 +1095,7 @@ jobs:
       # A push is a dispatch carrying the trigger_actor hint; a dispatch by
       # hand carries none.
       trigger_event: ${{ github.event_name == 'issue_comment' && 'comment' || ((inputs.trigger_actor || github.event.inputs.trigger_actor) != '' && 'push' || 'manual') }}
-      trigger_command: ${{ (github.event_name == 'issue_comment' || (inputs.trigger_actor || github.event.inputs.trigger_actor) == '') && format('/plan{0}', needs.resolve.outputs.project_filter != '' && format(' -p {0}', needs.resolve.outputs.project_filter) || '') || '' }}
+      trigger_command: ${{ (github.event_name == 'issue_comment' || (inputs.trigger_actor || github.event.inputs.trigger_actor) == '') && format('tfpr plan{0}', needs.resolve.outputs.project_filter != '' && format(' -p {0}', needs.resolve.outputs.project_filter) || '') || '' }}
       trigger_actor: ${{ inputs.trigger_actor || github.event.inputs.trigger_actor || github.actor }}
       license_list_source: ${{ needs.resolve.outputs.license_list_source }}
     # Explicit, not inherit: this workflow runs for callers in any organization.
@@ -1093,7 +1126,7 @@ jobs:
       pull-requests: write   # post the run report
       checks: write          # complete the pre-created PR check
     # The PR's one concurrency family, shared with the plan jobs above: two
-    # /apply comments never race, and a push mid-apply queues its plan
+    # tfpr apply comments never race, and a push mid-apply queues its plan
     # here until the apply finishes (#290). The plan matrix legs also hold
     # tfpr-<label>, so a unit already planning on this PR is walked only
     # after that plan job has released the group.
@@ -1306,10 +1339,10 @@ jobs:
           TFPR_REPORT_DIR: ${{ runner.temp }}/tfpr-out
           # For consumers that list the cost gate under the apply stage (#264, #270).
           INFRACOST_API_KEY: ${{ secrets.INFRACOST_API_KEY }}
-          # /apply --force: apply even when the plan differs from the reviewed one.
+          # tfpr apply --force: apply even when the plan differs from the reviewed one.
           TFPR_APPLY_FORCE: ${{ needs.resolve.outputs.force }}
           TFPR_TRIGGER_EVENT: ${{ github.event_name == 'issue_comment' && 'comment' || 'manual' }}
-          TFPR_TRIGGER_COMMAND: ${{ format('/apply{0}{1}', needs.resolve.outputs.project_filter != '' && format(' -p {0}', needs.resolve.outputs.project_filter) || '', needs.resolve.outputs.force == 'true' && ' --force' || '') }}
+          TFPR_TRIGGER_COMMAND: ${{ format('tfpr apply{0}{1}', needs.resolve.outputs.project_filter != '' && format(' -p {0}', needs.resolve.outputs.project_filter) || '', needs.resolve.outputs.force == 'true' && ' --force' || '') }}
           TFPR_TRIGGER_ACTOR: ${{ github.actor }}
           # Cross-PR unit lock ownership (tfpr lock).
           TFPR_LOCK_STORAGE_ACCOUNT: ${{ vars.TFPR_LOCK_STORAGE_ACCOUNT }}
@@ -1342,7 +1375,7 @@ jobs:
         run: '"$TFPR_BIN" verify-head'
 
   # Release every cross-PR unit lock the PR holds. Two triggers land here: the
-  # PR closing (merged or not; automatic) and an explicit /unlock comment (to
+  # PR closing (merged or not; automatic) and an explicit tfpr unlock comment (to
   # free units held by an abandoned-but-still-open PR). Runs on the project
   # runner with an Azure OIDC login because the lock table lives on the
   # (network-scoped) state storage account, so it has to bind an environment:
@@ -1369,7 +1402,7 @@ jobs:
     permissions:
       contents: read
       id-token: write        # Azure OIDC login
-      pull-requests: write   # confirm /unlock with a comment
+      pull-requests: write   # confirm tfpr unlock with a comment
     env:
       TFPR_LOCK_STORAGE_ACCOUNT: ${{ vars.TFPR_LOCK_STORAGE_ACCOUNT }}
       TFPR_LOCK_TABLE: ${{ vars.TFPR_LOCK_TABLE }}
@@ -1440,7 +1473,7 @@ jobs:
           PR_NUMBER: ${{ needs.resolve.outputs.pr_number }}
         run: '"$TFPR_BIN" lock release-pr'
 
-      # Comment path only: answer the explicit /unlock. The automatic PR-close
+      # Comment path only: answer the explicit tfpr unlock. The automatic PR-close
       # release stays silent to avoid a comment on every merged PR.
       - name: Confirm unlock
         if: github.event_name == 'issue_comment'
@@ -1453,7 +1486,7 @@ jobs:
           printf '🔓 Released %s unit lock(s) held by this PR.\n' "${RELEASED:-0}" > .tfpr-unlock.md
           REPORT_FILE=.tfpr-unlock.md "$TFPR_BIN" comment
 
-  # Aggregate per-project outcomes into the stable tf-pr-ops / merge-gate
+  # Aggregate per-project outcomes into the stable tfpr / merge-gate
   # check that gates merge. Make it a required check in the ruleset.
   gate:
     needs: [resolve, plan, apply]

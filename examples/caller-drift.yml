@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   engine:
-    uses: nrit-solutions/tf-pr-ops/.github/workflows/drift.yml@v11.0.2 # x-release-please-version
+    uses: nrit-solutions/tfpr/.github/workflows/drift.yml@v12.0.0 # x-release-please-version
     # Pass the secrets by name. GitHub drops secrets: inherit when the caller
     # is in another organization than the reusable workflow.
     secrets:

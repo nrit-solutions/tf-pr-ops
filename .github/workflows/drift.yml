@@ -381,7 +381,7 @@ jobs:
         env:
           COMMAND: plan
           # This report is embedded in an issue, not a PR comment. Suppresses the
-          # /apply instructions, which never run there.
+          # tfpr apply instructions, which never run there.
           TFPR_REPORT_CONTEXT: drift
           PROJECT_NAME: ${{ matrix.project.name }}
           PROJECT_DIR: ${{ matrix.project.dir }}

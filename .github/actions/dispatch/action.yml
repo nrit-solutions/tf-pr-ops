@@ -1,4 +1,4 @@
-name: tf-pr-ops dispatch
+name: tfpr dispatch
 description: >-
   The engine's pull_request path: hand the pull request to the consumer's
   ops workflow on the default branch: plan for an open PR, unlock for a
@@ -14,7 +14,7 @@ inputs:
       File name of the caller workflow that runs the ops (reusable) workflow;
       the dispatch target for plan work and unlocks.
     required: false
-    default: tf-pr-ops.yml
+    default: tfpr.yml
 
 runs:
   using: composite

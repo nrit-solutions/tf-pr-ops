@@ -1,4 +1,4 @@
-# Starter conftest policy for the tf-pr-ops policy gate. NOT LOADED.
+# Starter conftest policy for the tfpr policy gate. NOT LOADED.
 #
 # This file lives under examples/ and the gate never reads it. The gate globs
 # <consumer repo>/policy/*.rego, so copy it into a policy/ directory at your

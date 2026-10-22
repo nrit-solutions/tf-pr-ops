@@ -1,7 +1,8 @@
-# tf-pr-ops
+# tfpr
 
-Plan and apply Terraform and Terragrunt from a pull request, driven by
-comments, with unit locks, drift detection, and policy, scan, and cost gates.
+tfpr, Terraform PR operations. Plan and apply Terraform and Terragrunt from a
+pull request, driven by comments, with unit locks, drift detection, and
+policy, scan, and cost gates.
 
 This repository holds the released copies of the reusable workflows, the
 dispatch action, and the caller examples. Each release also carries the
@@ -16,10 +17,10 @@ infrastructure repository and pin all of them to one tag:
 
 | Caller | Purpose |
 | --- | --- |
-| `caller-tf-pr-ops-pr.yml` | the pull_request path: lint, then the dispatch action |
-| `caller-tf-pr-ops-unlock.yml` | releases unit locks when a pull request closes |
-| `caller-tf-pr-ops-review.yml` | refreshes the approval row when a review is submitted or dismissed |
-| `caller-tf-pr-ops.yml` | comment commands (`/plan`, `/apply`, `/unlock`, `/help`) and dispatched work |
+| `caller-tfpr-pr.yml` | the pull_request path: lint, then the dispatch action |
+| `caller-tfpr-unlock.yml` | releases unit locks when a pull request closes |
+| `caller-tfpr-review.yml` | refreshes the approval row when a review is submitted or dismissed |
+| `caller-tfpr.yml` | comment commands (`tfpr plan`, `tfpr apply`, `tfpr unlock`, `tfpr help`) and dispatched work |
 | `caller-drift.yml` | the scheduled drift sweep |
 
 The `uses:` ref is the only pin. Each job installs the runtime attached to
@@ -29,7 +30,7 @@ no moving major tag.
 
 The callers need the variables, secrets and environments listed at
 https://docs.nrit.cloud/setup/secrets-and-variables/, including the
-`TFPR_LICENSE` and `TFPR_ENTITLEMENT` variables that `/apply` needs (see
+`TFPR_LICENSE` and `TFPR_ENTITLEMENT` variables that `tfpr apply` needs (see
 https://docs.nrit.cloud/operations/license/). Setup, commands, gates and
 operations are documented at https://docs.nrit.cloud/.
 
