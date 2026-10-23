@@ -6,7 +6,8 @@
 # of a skipped pre-commit row and a second dispatch row stacked on the last
 # real run (#206). The dispatch action only dispatches the unlock, so no
 # credentials are needed here.
-name: tfpr unlock
+# Named like the PR caller so the row reads "tfpr / unlock", like every other row.
+name: tfpr
 
 on:
   pull_request:
@@ -21,4 +22,4 @@ jobs:
     if: github.event.repository.is_template != true
     runs-on: ubuntu-latest
     steps:
-      - uses: nrit-solutions/tfpr/.github/actions/dispatch@v12.0.0 # x-release-please-version
+      - uses: nrit-solutions/tfpr/.github/actions/dispatch@v12.1.0 # x-release-please-version

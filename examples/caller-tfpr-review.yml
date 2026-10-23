@@ -6,7 +6,8 @@
 # next push or comment (#431). The dispatch action only dispatches a review
 # refresh, so no credentials are needed here. Its own workflow, like the
 # unlock caller, so a review adds no skipped rows to the PR (#206).
-name: tfpr review
+# Named like the PR caller so the row reads "tfpr / review", like every other row.
+name: tfpr
 
 on:
   pull_request_review:
@@ -17,8 +18,8 @@ permissions:
   actions: write         # dispatch the ops workflow
 
 jobs:
-  refresh:
+  review:
     if: github.event.repository.is_template != true
     runs-on: ubuntu-latest
     steps:
-      - uses: nrit-solutions/tfpr/.github/actions/dispatch@v12.0.0 # x-release-please-version
+      - uses: nrit-solutions/tfpr/.github/actions/dispatch@v12.1.0 # x-release-please-version
